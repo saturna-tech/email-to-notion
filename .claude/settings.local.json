@@ -15,7 +15,8 @@
       "Bash(terraform refresh:*)",
       "Bash(dig:*)",
       "Bash(terraform output:*)",
-      "Bash(aws ssm get-parameter:*)"
+      "Bash(aws ssm get-parameter:*)",
+      "Bash(cat:*)"
     ]
   }
 }

@@ -3,6 +3,9 @@
 
 aws_region = "us-east-1"
 
+# Your domain for receiving email (must have MX records pointing to SES)
+email_domain = "yourdomain.com"
+
 # Secret for inbox email address: notion-{inbox_secret}@yourdomain.com
 # Generate with: uuidgen
 inbox_secret = "your-uuid-here"
@@ -23,7 +26,4 @@ notion_api_key = "secret_xxxxx"
 # Optional: AI summarization with Claude
 # Leave empty to disable
 anthropic_api_key = ""
-summary_prompt    = ""
-
-# Example summary prompt (uncomment to enable):
-# summary_prompt = "Summarize this email in 2-3 sentences, focusing on action items and key information."
+summary_prompt    = "Summarize this email in 2-3 sentences, focusing on action items and key information."
