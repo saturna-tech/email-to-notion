@@ -1,6 +1,6 @@
 # Email-to-Notion
 
-Forward emails to a Notion database. Self-hosted on AWS Lambda.
+Forward emails to a Notion database. Self-hosted on AWS Lambda with Postmark middleware.
 
 Author: Ryan Cabeen, ryan@saturnatech.com
 
