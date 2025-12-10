@@ -288,19 +288,26 @@ function markdownToBlocks(markdown) {
       continue;
     }
 
-    // Block quote - skip if empty (just > or >> or "> > >" etc.)
+    // Strip all quote prefixes ("> ", "> > ", etc.) and treat as regular text
     if (/^[\s>]+$/.test(line)) {
+      // Skip empty quote lines
       i++;
       continue;
     }
     if (/^>\s*/.test(line)) {
-      const text = line.replace(/^>\s*/, '');
-      blocks.push({
-        type: 'quote',
-        quote: {
-          rich_text: parseRichText(text),
-        },
-      });
+      // Remove all leading > and spaces, treat as paragraph
+      const text = line.replace(/^(>\s*)+/, '');
+      if (text) {
+        const chunks = chunkText(text);
+        for (const chunk of chunks) {
+          blocks.push({
+            type: 'paragraph',
+            paragraph: {
+              rich_text: parseRichText(chunk),
+            },
+          });
+        }
+      }
       i++;
       continue;
     }

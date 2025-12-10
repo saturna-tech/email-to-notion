@@ -4,7 +4,8 @@
       "Bash(node:*)",
       "Bash(terraform init:*)",
       "Bash(terraform validate:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(npm test)"
     ]
   }
 }
