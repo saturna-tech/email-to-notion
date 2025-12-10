@@ -1,6 +1,6 @@
 # Email to Notion
 
-A self-hosted service for forwarding emails to a Notion database, built on AWS with Lambda, SES, and S3.
+A self-hosted service privacy-centric service for archiving emails to Notion, built on AWS.
 
 Author: Ryan Cabeen, ryan@saturnatech.com
 
