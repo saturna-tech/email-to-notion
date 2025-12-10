@@ -34,6 +34,7 @@ async function summarizeEmail(emailBody, summaryPrompt, apiKey) {
     const response = await client.messages.create({
       model: 'claude-3-5-haiku-latest',
       max_tokens: 300,
+      system: 'You are a concise email summarizer. Output ONLY the summary itself—no preamble, no apologies, no meta-commentary about the email quality or completeness. If the email lacks detail, summarize what IS there. Never say "I cannot" or "I apologize".',
       messages: [
         {
           role: 'user',
