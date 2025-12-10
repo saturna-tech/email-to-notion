@@ -1,4 +1,4 @@
-# Email-to-Notion
+# Notion Email Archiver
 
 Forward emails to a Notion database. Self-hosted on AWS Lambda with Postmark middleware.
 

@@ -1,5 +1,5 @@
 {
-  "name": "email-to-notion",
+  "name": "notion-email-archiver",
   "version": "1.0.0",
   "description": "Forward emails to a Notion database",
   "main": "index.js",

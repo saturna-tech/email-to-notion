@@ -1,6 +1,6 @@
 # Quickstart Guide
 
-This guide walks you through setting up Email-to-Notion from scratch. Total time: ~30 minutes.
+This guide walks you through setting up Notion Email Archiver from scratch. Total time: ~30 minutes.
 
 ---
 

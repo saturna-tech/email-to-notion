@@ -4,7 +4,7 @@ This file provides context for Claude Code when working on this project.
 
 ## Project Overview
 
-Email-to-Notion is a self-hosted system that receives forwarded emails and stores them in a Notion database. Users forward completed email threads to a secret inbox address with a `#clientname:` tag in the subject line.
+Notion Email Archiver is a self-hosted system that receives forwarded emails and stores them in a Notion database. Users forward completed email threads to a secret inbox address with a `#clientname` tag in the subject line.
 
 ## Key Documents
 

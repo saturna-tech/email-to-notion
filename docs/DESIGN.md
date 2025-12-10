@@ -1,4 +1,4 @@
-# Email-to-Notion Integration: Design Document
+# Notion Email Archiver: Design Document
 
 ## Overview
 

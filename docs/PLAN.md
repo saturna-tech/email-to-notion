@@ -1,6 +1,6 @@
 # Implementation Plan
 
-This document outlines the staged implementation plan for the Email-to-Notion integration system as specified in DESIGN.md.
+This document outlines the staged implementation plan for Notion Email Archiver as specified in DESIGN.md.
 
 ---
 
