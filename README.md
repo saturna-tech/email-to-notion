@@ -4,6 +4,16 @@ A self-hosted service for forwarding emails to a Notion database, built on AWS w
 
 Author: Ryan Cabeen, ryan@saturnatech.com
 
+## Why This Exists
+
+Email is where client communication happens, but it's a terrible archive. Threads get buried, attachments scatter across inboxes, and searching for "that invoice from Acme" means digging through thousands of messages.
+
+This tool solves that by letting you selectively archive important email threads to Notion with a simple forward. Tag the client in the subject line, and the email lands in a searchable database—complete with the original sender, formatted content, and attachments.
+
+**The key insight**: You don't want *all* your email in Notion. You want to *choose* which threads matter, then forget about them until you need to find them again.
+
+**Why self-hosted?** Your email contains sensitive client data. This runs entirely in your AWS account—no third-party services see your content beyond transient processing. You own the infrastructure, the data stays yours.
+
 ## How It Works
 
 1. Forward an email to `notion-{secret}@yourdomain.com`
