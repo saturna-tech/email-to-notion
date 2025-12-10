@@ -3,6 +3,7 @@
  */
 
 const { Client } = require('@notionhq/client');
+const crypto = require('crypto');
 
 /**
  * Create a Notion client
@@ -52,6 +53,9 @@ async function createEmailEntry(client, options) {
     }
   }
 
+  // Generate UUID for this entry
+  const uuid = crypto.randomUUID();
+
   // Build properties
   const properties = {
     // Name is the title property
@@ -60,6 +64,16 @@ async function createEmailEntry(client, options) {
         {
           text: {
             content: subject || 'Untitled',
+          },
+        },
+      ],
+    },
+    // UUID - rich text
+    UUID: {
+      rich_text: [
+        {
+          text: {
+            content: uuid,
           },
         },
       ],
