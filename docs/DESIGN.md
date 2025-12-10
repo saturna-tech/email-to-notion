@@ -75,6 +75,12 @@ A self-hosted system that receives forwarded emails and stores them in a Notion 
 - Full MIME access (complete email with attachments)
 - No per-email costs beyond standard SES pricing ($0.10/1000 emails)
 
+**Inbound-only design**:
+This system only uses SES for *receiving* email—it never sends email. This is an intentional design choice:
+- **No sandbox restrictions**: SES sandbox mode restricts *outbound* email to verified addresses only. Since we don't send email, sandbox mode doesn't affect us.
+- **Simpler setup**: No need to request production access or verify sender identities for outbound.
+- **Errors logged to Notion**: Instead of sending error notification emails, failures are logged directly to the Notion database where you'll see them alongside successful entries.
+
 ### 2. AWS S3 Email Storage
 
 **Purpose**: Temporary storage for raw MIME emails
@@ -167,9 +173,9 @@ function parseSubject(subject) {
 | `Missing hashtag` | Error | — |
 
 
-### 5. Sender Validation
+### 5. Sender Validation (Whitelist)
 
-Only emails from whitelisted addresses are processed. All others are silently ignored.
+Only emails from whitelisted addresses are processed. All others are silently ignored—no error logging, no response.
 
 **Configuration**:
 - `allowedSenders`: Array of email addresses permitted to forward emails
@@ -190,6 +196,12 @@ function validateSender(fromAddress, allowedSenders) {
 
 **Why whitelist instead of secret-only?**
 The inbox secret prevents random spam, but anyone who discovers the address could submit entries. The sender whitelist ensures only you (from your known email addresses) can create database entries.
+
+**Defense in depth**: The system uses two layers of protection:
+1. **Secret inbox address** - Obscurity prevents discovery (`notion-{uuid}@domain.com`)
+2. **Sender whitelist** - Even if discovered, only authorized senders can create entries
+
+This combination means an attacker would need both the secret address AND access to one of your email accounts to create entries.
 
 
 ### 6. Forwarded Email Parsing
@@ -363,11 +375,17 @@ You create the database manually in Notion with these properties:
 | Property | Type | Purpose |
 |----------|------|---------|
 | Name | title | Email subject (cleaned) |
+| UUID | rich_text | Unique identifier for deduplication |
 | Date | date | When email was received |
 | From | rich_text | Original sender address |
 | Client | rich_text | Extracted from #hashtag |
 | Has Attachments | checkbox | Quick filter for emails with files |
 | Summary | rich_text | AI-generated summary (if enabled) |
+
+**UUID Property**:
+Each entry receives a unique UUID generated at processing time. This serves two purposes:
+1. **Deduplication** - If an email is processed twice (e.g., Lambda retry), the UUID helps identify duplicates
+2. **External reference** - Provides a stable identifier that doesn't change if the subject is edited
 
 **Page Content Structure**:
 Each database row is also a page. The email body and attachments are added as page content.
@@ -507,11 +525,26 @@ output "ses_inbox_address" {
 
 ## Security Considerations
 
-### Inbox Address Security
-The inbox email address contains a secret: `notion-{secret}@yourdomain.com`. Anyone who knows this address can create entries in your Notion database. Choose a sufficiently random secret (e.g., UUID or 32+ character random string).
+### Multi-Layer Access Control
 
-### SES Receipt Rule Filtering
-The SES receipt rule only accepts emails sent to the exact secret inbox address. Emails to other addresses at your domain are not processed.
+The system uses defense in depth with three security layers:
+
+| Layer | Protection | What it prevents |
+|-------|------------|------------------|
+| **Secret inbox address** | `notion-{uuid}@domain.com` | Random spam, discovery by scanning |
+| **Sender whitelist** | Only specified email addresses | Unauthorized submissions even if address is discovered |
+| **SES receipt rule** | Exact recipient match | Processing of emails to other addresses at your domain |
+
+An attacker would need: (1) your secret inbox address, (2) ability to send from one of your whitelisted email addresses, AND (3) knowledge of the #hashtag format to create entries.
+
+### Inbox Address Security
+The inbox email address contains a secret: `notion-{secret}@yourdomain.com`. Choose a sufficiently random secret (e.g., UUID or 32+ character random string). The secret should be treated like a password—don't share it or commit it to version control.
+
+### Sender Whitelist
+The `allowed-senders` parameter contains email addresses permitted to create entries. Emails from any other address are silently rejected—no error response, no logging to Notion. This prevents:
+- Spam submissions if the inbox address is discovered
+- Unauthorized users from creating entries
+- Phishing attempts using your archival system
 
 ### Secrets Management
 - All API keys stored in SSM Parameter Store as SecureString
@@ -526,7 +559,7 @@ The SES receipt rule only accepts emails sent to the exact secret inbox address.
 ### Email Storage
 - Raw emails stored in S3 with 7-day retention
 - Auto-deleted after processing window
-- No long-term email storage
+- No long-term email storage in AWS
 
 ---
 
