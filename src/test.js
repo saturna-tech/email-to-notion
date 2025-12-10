@@ -104,6 +104,10 @@ test('is case insensitive', () => {
   assert(validateRecipient('NOTION-ABC123@example.com', 'ABC123'));
 });
 
+test('validates recipient with display name', () => {
+  assert(validateRecipient('"Notion Archive" <notion-abc123@example.com>', 'abc123'));
+});
+
 // ============ validateSender tests ============
 
 console.log('\n--- validateSender tests ---');

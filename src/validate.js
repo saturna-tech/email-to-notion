@@ -4,7 +4,7 @@
 
 /**
  * Validate that the recipient address contains the correct inbox secret
- * @param {string} toAddress - The recipient email address
+ * @param {string} toAddress - The recipient email address (may include display name)
  * @param {string} inboxSecret - The expected secret
  * @returns {boolean} - True if valid
  */
@@ -13,8 +13,14 @@ function validateRecipient(toAddress, inboxSecret) {
     return false;
   }
 
+  // Extract email from "Display Name <email>" format if present
+  const email = extractEmail(toAddress);
+  if (!email) {
+    return false;
+  }
+
   // Extract the local part before @
-  const localPart = toAddress.split('@')[0]?.toLowerCase();
+  const localPart = email.split('@')[0]?.toLowerCase();
 
   // Expected format: notion-{secret}
   const expectedPrefix = `notion-${inboxSecret.toLowerCase()}`;

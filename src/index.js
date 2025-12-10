@@ -213,7 +213,8 @@ exports.handler = async (event) => {
       const { uploaded, warnings: uploadWarnings } = await uploadAttachments(
         notionClient,
         page.id,
-        validAttachments
+        validAttachments,
+        config.notionApiKey
       );
       attachmentWarnings.push(...uploadWarnings);
       console.log('Attachments processed', { requestId, uploaded });

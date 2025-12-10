@@ -2,16 +2,37 @@
  * Attachment handling for email-to-notion
  */
 
-const { Client } = require('@notionhq/client');
-
 // File types that should be displayed as images in Notion
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
+
+// File types that should be displayed as PDFs in Notion
+const PDF_EXTENSIONS = ['pdf'];
 
 // File types that are blocked for security
 const BLOCKED_EXTENSIONS = ['exe', 'dll', 'bat', 'sh', 'cmd', 'com', 'msi', 'vbs', 'js', 'ps1'];
 
 // Maximum file size (20MB - Notion's limit)
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
+
+// MIME type mapping
+const MIME_TYPES = {
+  'pdf': 'application/pdf',
+  'png': 'image/png',
+  'jpg': 'image/jpeg',
+  'jpeg': 'image/jpeg',
+  'gif': 'image/gif',
+  'webp': 'image/webp',
+  'bmp': 'image/bmp',
+  'doc': 'application/msword',
+  'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'xls': 'application/vnd.ms-excel',
+  'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'ppt': 'application/vnd.ms-powerpoint',
+  'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'txt': 'text/plain',
+  'csv': 'text/csv',
+  'zip': 'application/zip',
+};
 
 /**
  * Filter attachments to include only valid ones
@@ -89,35 +110,131 @@ function formatFileSize(bytes) {
 }
 
 /**
- * Upload attachments to a Notion page
- * Note: Notion's API doesn't support direct file uploads for external integrations.
- * Files must be hosted externally. For this implementation, we'll create file blocks
- * that reference the original email (which won't work since Postmark doesn't host files).
- *
- * Alternative approach: We'll note that attachments existed but can't be uploaded directly.
- * In practice, you would need to:
- * 1. Upload to S3 or another hosting service, OR
- * 2. Use Notion's internal upload (not available via public API), OR
- * 3. Accept that attachments are noted but not viewable
- *
- * For this implementation, we'll add a note about attachments.
- *
- * @param {Client} notionClient - Notion client
+ * Get MIME type for a file extension
+ * @param {string} filename - The filename
+ * @returns {string} - MIME type
+ */
+function getMimeType(filename) {
+  const ext = getExtension(filename).toLowerCase();
+  return MIME_TYPES[ext] || 'application/octet-stream';
+}
+
+/**
+ * Check if a file should be displayed as a PDF in Notion
+ * @param {string} filename - The filename
+ * @returns {boolean}
+ */
+function isPdfFile(filename) {
+  const ext = getExtension(filename).toLowerCase();
+  return PDF_EXTENSIONS.includes(ext);
+}
+
+/**
+ * Get the Notion block type for a file
+ * @param {string} filename - The filename
+ * @returns {string} - Block type (image, pdf, or file)
+ */
+function getBlockType(filename) {
+  if (isImageFile(filename)) return 'image';
+  if (isPdfFile(filename)) return 'pdf';
+  return 'file';
+}
+
+/**
+ * Upload a single file to Notion using the file upload API
+ * @param {string} notionApiKey - Notion API key
+ * @param {string} filename - The filename
+ * @param {string} base64Content - Base64 encoded file content
+ * @returns {Promise<string|null>} - File upload ID or null on failure
+ */
+async function uploadFileToNotion(notionApiKey, filename, base64Content) {
+  const mimeType = getMimeType(filename);
+
+  try {
+    // Step 1: Create file upload object
+    const createResponse = await fetch('https://api.notion.com/v1/file_uploads', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${notionApiKey}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        filename: filename,
+        content_type: mimeType,
+      }),
+    });
+
+    if (!createResponse.ok) {
+      const errorText = await createResponse.text();
+      console.warn(`File upload create failed (${createResponse.status}): ${errorText.slice(0, 200)}`);
+      return null;
+    }
+
+    const createData = await createResponse.json();
+    const fileUploadId = createData.id;
+
+    if (!fileUploadId) {
+      console.warn(`No file upload ID returned for ${filename}`);
+      return null;
+    }
+
+    // Step 2: Send file content using multipart/form-data
+    // Decode base64 to binary
+    const binaryContent = Buffer.from(base64Content, 'base64');
+
+    // Create multipart form data manually
+    const boundary = '----NotionFileUpload' + Date.now();
+    const formDataParts = [
+      `--${boundary}\r\n`,
+      `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n`,
+      `Content-Type: ${mimeType}\r\n\r\n`,
+    ];
+
+    const header = Buffer.from(formDataParts.join(''));
+    const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const body = Buffer.concat([header, binaryContent, footer]);
+
+    const sendResponse = await fetch(`https://api.notion.com/v1/file_uploads/${fileUploadId}/send`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${notionApiKey}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body: body,
+    });
+
+    if (!sendResponse.ok) {
+      const errorText = await sendResponse.text();
+      console.warn(`File upload send failed (${sendResponse.status}): ${errorText.slice(0, 200)}`);
+      return null;
+    }
+
+    console.log(`Uploaded file: ${filename}`);
+    return fileUploadId;
+
+  } catch (error) {
+    console.error(`Failed to upload ${filename}: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Upload attachments to a Notion page using the file upload API
+ * @param {Object} notionClient - Notion client
  * @param {string} pageId - Notion page ID
  * @param {Array} attachments - Valid attachments to upload
+ * @param {string} notionApiKey - Notion API key for file uploads
  * @returns {{ uploaded: number, warnings: string[] }}
  */
-async function uploadAttachments(notionClient, pageId, attachments) {
+async function uploadAttachments(notionClient, pageId, attachments, notionApiKey) {
   const warnings = [];
   let uploaded = 0;
 
   if (!attachments || attachments.length === 0) {
     return { uploaded, warnings };
   }
-
-  // Create blocks to note the attachments
-  // Since Notion API doesn't support direct file uploads from base64,
-  // we'll create a section listing the attachments that were in the email
 
   const blocks = [];
 
@@ -141,50 +258,68 @@ async function uploadAttachments(notionClient, pageId, attachments) {
     },
   });
 
-  // List each attachment
+  // Upload and add each attachment
   for (const att of attachments) {
     const filename = att.Name || 'unknown';
-    const size = formatFileSize(att.ContentLength || 0);
-    const isImage = isImageFile(filename);
-    const icon = isImage ? '🖼️' : '📎';
+    const base64Content = att.Content || att.ContentData;
 
-    blocks.push({
-      type: 'bulleted_list_item',
-      bulleted_list_item: {
-        rich_text: [
-          {
-            type: 'text',
-            text: { content: `${icon} ${filename} (${size})` },
-          },
-        ],
-      },
-    });
+    if (!base64Content) {
+      warnings.push(`No content for attachment: ${filename}`);
+      continue;
+    }
 
-    uploaded++;
+    // Upload file to Notion
+    const fileUploadId = await uploadFileToNotion(notionApiKey, filename, base64Content);
+
+    if (fileUploadId) {
+      // Create appropriate block type based on file extension
+      const blockType = getBlockType(filename);
+      const fileObj = { type: 'file_upload', file_upload: { id: fileUploadId } };
+
+      if (blockType === 'image') {
+        blocks.push({
+          type: 'image',
+          image: fileObj,
+        });
+      } else if (blockType === 'pdf') {
+        blocks.push({
+          type: 'pdf',
+          pdf: fileObj,
+        });
+      } else {
+        blocks.push({
+          type: 'file',
+          file: fileObj,
+        });
+      }
+      uploaded++;
+    } else {
+      // Fallback: list the attachment with a warning
+      const size = formatFileSize(att.ContentLength || 0);
+      blocks.push({
+        type: 'callout',
+        callout: {
+          icon: { type: 'emoji', emoji: '⚠️' },
+          color: 'yellow_background',
+          rich_text: [
+            {
+              type: 'text',
+              text: { content: `Failed to upload: ${filename} (${size})` },
+            },
+          ],
+        },
+      });
+      warnings.push(`Failed to upload: ${filename}`);
+    }
   }
 
-  // Add note about attachment limitation
-  blocks.push({
-    type: 'callout',
-    callout: {
-      icon: { type: 'emoji', emoji: 'ℹ️' },
-      color: 'gray_background',
-      rich_text: [
-        {
-          type: 'text',
-          text: {
-            content: 'Note: Attachments are listed but not uploaded. Retrieve originals from your email client.',
-          },
-        },
-      ],
-    },
-  });
-
   // Append blocks to page
-  await notionClient.blocks.children.append({
-    block_id: pageId,
-    children: blocks,
-  });
+  if (blocks.length > 0) {
+    await notionClient.blocks.children.append({
+      block_id: pageId,
+      children: blocks,
+    });
+  }
 
   return { uploaded, warnings };
 }
