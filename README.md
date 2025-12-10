@@ -1,6 +1,6 @@
-# Notion Email Archiver
+# Email to Notion
 
-Forward emails to a Notion database. Self-hosted on AWS Lambda with Postmark middleware.
+A self-hosted service for forwarding emails to a Notion database, built on AWS with Lambda, SES, and S3.
 
 Author: Ryan Cabeen, ryan@saturnatech.com
 
@@ -11,7 +11,7 @@ Author: Ryan Cabeen, ryan@saturnatech.com
 3. Email appears in your Notion database with parsed metadata
 
 ```
-Email → Postmark → Lambda → Notion
+Email → SES → S3 → Lambda → Notion
 ```
 
 ## Features
@@ -19,9 +19,9 @@ Email → Postmark → Lambda → Notion
 - **Client tagging** - `#acme: Fwd: Invoice` creates entry tagged "acme"
 - **Original sender extraction** - Parses forwarded headers, skips your replies
 - **Rich text conversion** - HTML emails become formatted Notion blocks
-- **Attachment listing** - Notes attachments (Notion API limitation)
+- **File uploads** - Attachments uploaded directly to Notion pages
 - **AI summaries** - Optional Claude 3.5 Haiku summarization
-- **Error notifications** - Email alerts for failures
+- **Error logging** - Failed emails logged to Notion with error details
 
 ## Quick Start
 
@@ -35,7 +35,7 @@ cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 # 2. Deploy
 cd terraform && terraform init && terraform apply
 
-# 3. Configure Postmark webhook with the output URL
+# 3. Configure DNS with MX record from terraform output
 ```
 
 ## Documentation
@@ -51,7 +51,7 @@ cd terraform && terraform init && terraform apply
 
 - **Runtime**: Node.js 20.x on AWS Lambda
 - **Infrastructure**: Terraform
-- **Email**: Postmark (inbound webhooks + outbound notifications)
+- **Email**: AWS SES (inbound) with S3 storage
 - **Database**: Notion API
 - **AI**: Claude 3.5 Haiku (optional)
 

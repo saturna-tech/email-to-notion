@@ -6,7 +6,15 @@
       "Bash(terraform validate:*)",
       "Bash(npm install:*)",
       "Bash(npm test)",
-      "Bash(terraform apply:*)"
+      "Bash(terraform apply:*)",
+      "Bash(aws logs:*)",
+      "WebSearch",
+      "Bash(aws ses:*)",
+      "Bash(aws sesv2 get-email-identity:*)",
+      "Bash(terraform state show:*)",
+      "Bash(terraform refresh:*)",
+      "Bash(dig:*)",
+      "Bash(terraform output:*)"
     ]
   }
 }

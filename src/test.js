@@ -6,6 +6,7 @@
 const { parseSubject, parseForwardedHeaders, stripForwardingHeaders } = require('./parse');
 const { validateRecipient, validateSender, extractEmail } = require('./validate');
 const { filterAttachments } = require('./attachments');
+const { isSesEvent, parseMimeEmail } = require('./ses');
 
 let passed = 0;
 let failed = 0;
@@ -271,12 +272,164 @@ test('returns null for invalid input', () => {
   assertEqual(extractEmail('not an email'), null);
 });
 
-// ============ Summary ============
+// ============ SES parsing tests ============
 
-console.log('\n--- Summary ---');
-console.log(`Passed: ${passed}`);
-console.log(`Failed: ${failed}`);
+console.log('\n--- SES parsing tests ---');
 
-if (failed > 0) {
-  process.exit(1);
+test('detects SES event', () => {
+  const sesEvent = {
+    Records: [{ eventSource: 'aws:ses', ses: { mail: {}, receipt: {} } }]
+  };
+  assert(isSesEvent(sesEvent));
+});
+
+test('rejects non-SES event', () => {
+  const httpEvent = { body: '{}' };
+  assert(!isSesEvent(httpEvent));
+});
+
+test('rejects empty event', () => {
+  assert(!isSesEvent({}));
+  assert(!isSesEvent(null));
+  assert(!isSesEvent(undefined));
+});
+
+// ============ MIME parsing tests ============
+
+// Helper for async tests
+async function testAsync(name, fn) {
+  try {
+    await fn();
+    console.log(`✓ ${name}`);
+    passed++;
+  } catch (error) {
+    console.error(`✗ ${name}`);
+    console.error(`  ${error.message}`);
+    failed++;
+  }
 }
+
+// Run async tests
+async function runAsyncTests() {
+  console.log('\n--- MIME parsing tests ---');
+
+  await testAsync('parses simple plain text MIME email', async () => {
+    const mime = `From: sender@example.com
+To: recipient@example.com
+Subject: Test Subject
+Content-Type: text/plain; charset="UTF-8"
+
+This is the body.`;
+
+    const result = await parseMimeEmail(mime);
+    assertEqual(result.From, 'sender@example.com');
+    assertEqual(result.To, 'recipient@example.com');
+    assertEqual(result.Subject, 'Test Subject');
+    assert(result.TextBody.includes('This is the body'));
+  });
+
+  await testAsync('parses email with display name', async () => {
+    const mime = `From: John Doe <john@example.com>
+To: Jane Smith <jane@example.com>
+Subject: Hello
+
+Hi there!`;
+
+    const result = await parseMimeEmail(mime);
+    assertEqual(result.From, 'John Doe <john@example.com>');
+    assertEqual(result.FromName, 'John Doe');
+    assert(result.To.includes('jane@example.com'));
+  });
+
+  await testAsync('parses multipart email with HTML and text', async () => {
+    const mime = `From: sender@example.com
+To: recipient@example.com
+Subject: Multipart Test
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="boundary123"
+
+--boundary123
+Content-Type: text/plain; charset="UTF-8"
+
+Plain text version.
+
+--boundary123
+Content-Type: text/html; charset="UTF-8"
+
+<html><body><p>HTML version.</p></body></html>
+
+--boundary123--`;
+
+    const result = await parseMimeEmail(mime);
+    assert(result.TextBody.includes('Plain text version'));
+    assert(result.HtmlBody.includes('HTML version'));
+  });
+
+  await testAsync('parses email with attachment', async () => {
+    const mime = `From: sender@example.com
+To: recipient@example.com
+Subject: With Attachment
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="boundary456"
+
+--boundary456
+Content-Type: text/plain; charset="UTF-8"
+
+See attached.
+
+--boundary456
+Content-Type: application/pdf; name="test.pdf"
+Content-Disposition: attachment; filename="test.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJeLjz9MK
+--boundary456--`;
+
+    const result = await parseMimeEmail(mime);
+    assertEqual(result.Attachments.length, 1);
+    assertEqual(result.Attachments[0].Name, 'test.pdf');
+    assertEqual(result.Attachments[0].ContentType, 'application/pdf');
+    assert(result.Attachments[0].Content.length > 0);
+  });
+
+  await testAsync('handles CID-embedded images', async () => {
+    const mime = `From: sender@example.com
+To: recipient@example.com
+Subject: Inline Image
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="boundary789"
+
+--boundary789
+Content-Type: text/html; charset="UTF-8"
+
+<html><body><img src="cid:logo123"></body></html>
+
+--boundary789
+Content-Type: image/png; name="logo.png"
+Content-ID: <logo123>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--boundary789--`;
+
+    const result = await parseMimeEmail(mime);
+    // Should have the inline image with ContentID set
+    assertEqual(result.Attachments.length, 1);
+    assertEqual(result.Attachments[0].ContentID, 'logo123');
+  });
+}
+
+// ============ Run async tests and summary ============
+
+runAsyncTests().then(() => {
+  console.log('\n--- Summary ---');
+  console.log(`Passed: ${passed}`);
+  console.log(`Failed: ${failed}`);
+
+  if (failed > 0) {
+    process.exit(1);
+  }
+}).catch(err => {
+  console.error('Test runner error:', err);
+  process.exit(1);
+});

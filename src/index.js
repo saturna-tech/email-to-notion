@@ -1,17 +1,17 @@
 /**
  * Email-to-Notion Lambda Handler
  *
- * Receives inbound emails from Postmark and creates entries in a Notion database.
+ * Receives inbound emails from SES and creates entries in a Notion database.
  */
 
 const { SSMClient, GetParametersCommand } = require('@aws-sdk/client-ssm');
 const { validateRecipient, validateSender } = require('./validate');
 const { parseSubject, parseForwardedHeaders, stripForwardingHeaders } = require('./parse');
 const { processEmailBody } = require('./convert');
-const { createClient, createEmailEntry, getPageUrl, addWarningCallout } = require('./notion');
+const { createClient, createEmailEntry, createErrorEntry, getPageUrl, addWarningCallout } = require('./notion');
 const { filterAttachments, uploadAttachments } = require('./attachments');
 const { summarizeEmail, createSummaryBlock } = require('./summarize');
-const { notifyError, notifyWarning } = require('./notify');
+const { isSesEvent, processSesEvent } = require('./ses');
 
 const ssmClient = new SSMClient({});
 
@@ -34,7 +34,6 @@ async function loadConfig() {
     '/email-to-notion/allowed-senders',
     '/email-to-notion/notion-database-id',
     '/email-to-notion/notion-api-key',
-    '/email-to-notion/postmark-server-token',
     '/email-to-notion/anthropic-api-key',
     '/email-to-notion/summary-prompt',
   ];
@@ -57,7 +56,6 @@ async function loadConfig() {
     allowedSenders: params['allowed-senders']?.split(',').map(s => s.trim().toLowerCase()) || [],
     notionDatabaseId: params['notion-database-id'],
     notionApiKey: params['notion-api-key'],
-    postmarkServerToken: params['postmark-server-token'],
     anthropicApiKey: params['anthropic-api-key'] !== 'disabled' ? params['anthropic-api-key'] : null,
     summaryPrompt: params['summary-prompt'] !== 'disabled' ? params['summary-prompt'] : null,
   };
@@ -70,37 +68,31 @@ async function loadConfig() {
  * Main Lambda handler
  */
 exports.handler = async (event) => {
-  const requestId = event.requestContext?.requestId || 'unknown';
-  console.log('Received request', { requestId });
+  const requestId = event.Records?.[0]?.ses?.mail?.messageId || 'unknown';
+  console.log('Received SES event', { requestId });
 
   try {
-    // Parse the incoming request body
-    let body;
-    try {
-      if (event.body) {
-        body = typeof event.body === 'string' ? JSON.parse(event.body) : event.body;
-      } else {
-        body = event;
-      }
-    } catch (parseError) {
-      console.error('Failed to parse request body', { requestId, error: parseError.message });
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ message: 'OK', error: 'Invalid request body' }),
-      };
-    }
-
-    // Validate required fields exist
-    if (!body || typeof body !== 'object') {
-      console.error('Invalid request body structure', { requestId });
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ message: 'OK', error: 'Invalid request body' }),
-      };
+    // Validate this is an SES event
+    if (!isSesEvent(event)) {
+      console.error('Invalid event: not an SES event', { requestId });
+      throw new Error('Invalid event source - expected SES');
     }
 
     // Load configuration
     const config = await loadConfig();
+
+    // Fetch from S3 and parse MIME
+    const bucket = process.env.EMAIL_BUCKET;
+    if (!bucket) {
+      throw new Error('EMAIL_BUCKET environment variable not set');
+    }
+    const body = await processSesEvent(event, bucket);
+    console.log('SES email parsed', {
+      requestId,
+      from: body.From,
+      to: body.To,
+      subject: body.Subject?.slice(0, 100),
+    });
 
     // Log receipt (avoid logging full email content for privacy)
     console.log('Email received', {
@@ -132,9 +124,6 @@ exports.handler = async (event) => {
 
     console.log('Validation passed', { requestId });
 
-    // Derive notification sender address from the To address
-    const notificationFrom = body.To || 'noreply@example.com';
-
     // Stage 3: Parse subject line
     const parsed = parseSubject(body.Subject);
     const client = parsed.client;
@@ -145,7 +134,7 @@ exports.handler = async (event) => {
     const emailText = body.TextBody || '';
     const { originalFrom, originalDate } = parseForwardedHeaders(emailText, config.allowedSenders);
 
-    // Use extracted data or fall back to Postmark data
+    // Use extracted data or fall back to email headers
     const fromAddress = originalFrom || body.From;
     const emailDate = originalDate || body.Date;
 
@@ -160,7 +149,7 @@ exports.handler = async (event) => {
 
     // Stage 5: Process email body (convert to Notion blocks)
     const htmlBody = body.HtmlBody || '';
-    const contentBlocks = processEmailBody(htmlBody, cleanedTextBody, config.allowedSenders);
+    const { contentBlocks, cleanedContent } = processEmailBody(htmlBody, cleanedTextBody, config.allowedSenders);
 
     console.log('Content processed', { requestId, blockCount: contentBlocks.length });
 
@@ -177,9 +166,10 @@ exports.handler = async (event) => {
     });
 
     // Stage 8: AI summarization (if configured)
+    // Use the same cleaned content that goes to Notion
     let summary = null;
     if (config.anthropicApiKey && config.summaryPrompt) {
-      summary = await summarizeEmail(cleanedTextBody, config.summaryPrompt, config.anthropicApiKey);
+      summary = await summarizeEmail(cleanedContent, config.summaryPrompt, config.anthropicApiKey);
       if (summary) {
         console.log('Summary generated', { requestId, length: summary.length });
       }
@@ -226,21 +216,13 @@ exports.handler = async (event) => {
       console.log('Added attachment warnings', { requestId, count: attachmentWarnings.length });
     }
 
-    // Collect all warnings for potential notification
-    const allWarnings = [...attachmentWarnings];
-
-    // Stage 9: Send warning notification if there were issues
-    if (allWarnings.length > 0) {
-      await notifyWarning(config, body.From, pageUrl, allWarnings, notificationFrom);
-    }
-
     console.log('Email processed successfully', {
       requestId,
       client,
       pageId: page.id,
       hasAttachments,
       hasSummary: !!summary,
-      warningCount: allWarnings.length,
+      warningCount: attachmentWarnings.length,
     });
 
     return {
@@ -249,7 +231,6 @@ exports.handler = async (event) => {
     };
 
   } catch (error) {
-    // Always return 200 to Postmark to prevent retries
     // Log the error for debugging
     console.error('Error processing email', {
       requestId,
@@ -257,21 +238,27 @@ exports.handler = async (event) => {
       stack: error.stack,
     });
 
-    // Try to send error notification if we have enough context
+    // Log error to Notion database
     try {
       const config = cachedConfig || await loadConfig();
-      if (config.postmarkServerToken && event.body) {
-        const body = typeof event.body === 'string' ? JSON.parse(event.body) : event.body;
-        const notificationFrom = body.To || 'noreply@example.com';
-        await notifyError(config, body.From, body.Subject, error.message, notificationFrom);
+      const sesInfo = event.Records?.[0]?.ses;
+      if (config.notionApiKey && config.notionDatabaseId && sesInfo) {
+        const mail = sesInfo.mail;
+        const notionClient = createClient(config.notionApiKey);
+        await createErrorEntry(notionClient, {
+          databaseId: config.notionDatabaseId,
+          subject: mail.commonHeaders?.subject || 'Unknown',
+          from: mail.source || 'Unknown',
+          date: mail.timestamp,
+          errorMessage: error.message,
+        });
+        console.log('Error logged to Notion', { requestId });
       }
-    } catch (notifyErr) {
-      console.error('Failed to send error notification', { requestId, error: notifyErr.message });
+    } catch (notionErr) {
+      console.error('Failed to log error to Notion', { requestId, error: notionErr.message });
     }
 
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ message: 'OK', error: error.message }),
-    };
+    // Re-throw to signal Lambda failure (for retry/DLQ if configured)
+    throw error;
   }
 };

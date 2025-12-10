@@ -6,7 +6,7 @@ A self-hosted system that receives forwarded emails and stores them in a Notion 
 
 ### Goals
 - **Privacy**: No third-party services touch email content beyond transient processing
-- **Simplicity**: Minimal AWS infrastructure (Lambda, SSM), easy to maintain
+- **Simplicity**: Minimal AWS infrastructure (Lambda, SES, S3, SSM), easy to maintain
 - **Zero Configuration**: No client mappings—just use a new #hashtag for new clients
 - **Organization**: All emails in a single searchable Notion database with client filtering
 
@@ -24,14 +24,21 @@ A self-hosted system that receives forwarded emails and stores them in a Notion 
                 │
                 ▼
     ┌───────────────────┐
-    │     Postmark      │  ← Inbound email processing
-    │  Inbound Server   │    (parses email, POSTs JSON)
+    │      AWS SES      │  ← Inbound email receiving
+    │  Receipt Rules    │    (filters by recipient address)
     └────────┬──────────┘
-             │ HTTPS POST (webhook)
+             │ Store raw MIME
              ▼
     ┌───────────────────┐
-    │   Lambda Function │  ← Parse #client from subject
-    │      (Node.js)    │  ← Strip forwarding prefixes
+    │      AWS S3       │  ← Temporary email storage
+    │   Email Bucket    │    (7-day retention)
+    └────────┬──────────┘
+             │ Trigger (async)
+             ▼
+    ┌───────────────────┐
+    │   Lambda Function │  ← Parse MIME from S3
+    │      (Node.js)    │  ← Parse #client from subject
+    │                   │  ← Strip forwarding prefixes
     │                   │  ← Convert HTML to Notion blocks
     │                   │  ← Generate AI summary (optional)
     └────────┬──────────┘
@@ -47,61 +54,73 @@ A self-hosted system that receives forwarded emails and stores them in a Notion 
 
 ## Components
 
-### 1. Postmark Inbound Processing
+### 1. AWS SES Inbound Processing
 
-**What it does**: Receives emails at your domain and forwards them as structured JSON to your webhook.
+**What it does**: Receives emails at your domain and triggers Lambda processing.
 
 **Setup required**:
-- Configure MX records for your domain (or subdomain like `mail.yourdomain.com`)
-- Create an Inbound Server in Postmark
-- Point the webhook URL to your Lambda function
+- Verify your domain with SES (TXT record)
+- Configure MX records to point to SES (`inbound-smtp.{region}.amazonaws.com`)
+- Create receipt rule set with recipient filter
 
-**Postmark webhook payload** (relevant fields):
-```json
-{
-  "From": "you@gmail.com",
-  "FromName": "Your Name",
-  "To": "notion-abc123secret@yourdomain.com",
-  "Subject": "#acme: Fwd: Re: Q4 Invoice Discussion",
-  "TextBody": "Plain text content...",
-  "HtmlBody": "<html>...</html>",
-  "Date": "2024-12-09T10:30:00Z",
-  "Attachments": [...]
-}
-```
+**SES Flow**:
+1. Email arrives at `notion-{secret}@yourdomain.com`
+2. Receipt rule matches recipient address exactly
+3. Raw MIME stored in S3 bucket
+4. Lambda invoked asynchronously
 
-**Cost**: Free tier includes 100 inbound emails/month. $10/month for 10,000.
+**Why SES over other providers**:
+- Native AWS integration (no external webhooks)
+- Direct Lambda trigger
+- Full MIME access (complete email with attachments)
+- No per-email costs beyond standard SES pricing ($0.10/1000 emails)
 
+### 2. AWS S3 Email Storage
 
-### 2. AWS Lambda Function
+**Purpose**: Temporary storage for raw MIME emails
+
+**Configuration**:
+- Bucket with SES write permissions
+- Lifecycle policy: delete after 7 days
+- Lambda read access
+
+**Why store in S3**:
+- SES Lambda trigger only provides metadata, not email content
+- S3 provides reliable storage for MIME parsing
+- Allows retry if Lambda fails
+
+### 3. AWS Lambda Function
 
 **Runtime**: Node.js 20.x
-**Memory**: 512 MB (for HTML parsing and attachment processing)
+**Memory**: 512 MB (for MIME parsing and attachment processing)
 **Timeout**: 60 seconds (attachments may require multiple API calls)
 
 **Dependencies**:
 - `@notionhq/client` - Official Notion SDK
 - `@anthropic-ai/sdk` - Anthropic SDK for Claude API
-- `postmark` - Postmark SDK for sending notification emails
+- `@aws-sdk/client-s3` - S3 client for fetching emails
+- `@aws-sdk/client-ssm` - SSM client for configuration
+- `mailparser` - MIME email parsing
 - `turndown` - HTML to Markdown conversion
 - `turndown-plugin-gfm` - GitHub Flavored Markdown support (tables, strikethrough)
 
 **Responsibilities**:
-1. Receive POST from Postmark
-2. Validate recipient address contains the inbox secret
-3. Validate sender is in the allowed senders list
-4. Parse subject line to extract client tag and clean subject
-5. Extract original sender and date from forwarded headers
-6. Strip forwarding headers from email body
-7. Convert HTML email body to Markdown, then to Notion blocks
-8. Filter attachments (skip CID-embedded images, keep manual attachments)
-9. Generate AI summary of email content (if enabled)
-10. Create database row in Notion with properties (using extracted sender/date)
-11. Upload attachments directly to the Notion page
-12. Send error/warning notification email if anything fails
-13. Return success/failure to Postmark
+1. Receive SES event with S3 object reference
+2. Fetch raw MIME from S3
+3. Parse MIME to extract headers, body, attachments
+4. Validate recipient address contains the inbox secret
+5. Validate sender is in the allowed senders list
+6. Parse subject line to extract client tag and clean subject
+7. Extract original sender and date from forwarded headers
+8. Strip forwarding headers from email body
+9. Convert HTML email body to Markdown, then to Notion blocks
+10. Filter attachments (skip CID-embedded images, keep manual attachments)
+11. Generate AI summary of email content (if enabled)
+12. Create database row in Notion with properties (using extracted sender/date)
+13. Upload attachments directly to the Notion page
+14. Log errors to Notion database if processing fails
 
-**Configuration** (via environment variables or SSM Parameter Store):
+**Configuration** (via SSM Parameter Store):
 ```json
 {
   "inboxSecret": "your-random-secret-here",
@@ -109,13 +128,12 @@ A self-hosted system that receives forwarded emails and stores them in a Notion 
   "notionApiKey": "secret_xxx",
   "anthropicApiKey": "sk-ant-xxx",
   "summaryPrompt": "Summarize this email in 2-3 sentences, focusing on action items and key information.",
-  "allowedSenders": ["you@gmail.com", "you@work.com"],
-  "postmarkServerToken": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  "allowedSenders": ["you@gmail.com", "you@work.com"]
 }
 ```
 
 
-### 3. Subject Line Parsing
+### 4. Subject Line Parsing
 
 **Format**: `#clientname: Fwd: Re: Original Subject Here`
 
@@ -149,9 +167,9 @@ function parseSubject(subject) {
 | `Missing hashtag` | Error | — |
 
 
-### 4. Sender Validation
+### 5. Sender Validation
 
-Only emails from whitelisted addresses are processed. All others are silently ignored (no error notification to avoid spam replies).
+Only emails from whitelisted addresses are processed. All others are silently ignored.
 
 **Configuration**:
 - `allowedSenders`: Array of email addresses permitted to forward emails
@@ -174,19 +192,6 @@ function validateSender(fromAddress, allowedSenders) {
 The inbox secret prevents random spam, but anyone who discovers the address could submit entries. The sender whitelist ensures only you (from your known email addresses) can create database entries.
 
 
-### 5. Lambda Function URL
-
-**Why this over API Gateway**:
-- Simpler (no additional resource to manage)
-- Free (API Gateway has costs at scale)
-- HTTPS endpoint built into Lambda
-- Sufficient for webhook use case
-
-**Trade-offs**:
-- Less flexible than API Gateway (no request transformation, throttling controls)
-- No custom domain without CloudFront (Postmark doesn't care)
-
-
 ### 6. Forwarded Email Parsing
 
 When you forward an email, your email client adds headers containing the original sender information. The Lambda extracts this data before stripping the headers.
@@ -194,63 +199,6 @@ When you forward an email, your email client adds headers containing the origina
 **Data to Extract**:
 - **Original Sender**: The actual person who sent the email (not you, the forwarder)
 - **Original Date**: When the email was originally sent (not when you forwarded it)
-
-**Parsing Logic**:
-```javascript
-function parseForwardedHeaders(text, allowedSenders) {
-  let originalFrom = null;
-  let originalDate = null;
-
-  // Find all "From:" occurrences in the text
-  // This handles cases where your reply is at the top of the forwarded thread
-  const fromPattern = /From:\s*(.+?)(?:\n|$)/gim;
-  const datePattern = /(?:Date|Sent):\s*(.+?)(?:\n|$)/gim;
-
-  let match;
-  while ((match = fromPattern.exec(text)) !== null) {
-    const fromValue = match[1].trim();
-    const emailInFrom = extractEmail(fromValue);
-
-    // Skip if this is one of the allowed senders (i.e., yourself)
-    if (emailInFrom && isAllowedSender(emailInFrom, allowedSenders)) {
-      continue;
-    }
-
-    // Found a non-self sender
-    originalFrom = fromValue;
-    break;
-  }
-
-  // Get the date associated with the original sender
-  // (first Date/Sent after the From we matched, or first one if none found)
-  const dateMatch = datePattern.exec(text);
-  if (dateMatch) {
-    originalDate = parseDate(dateMatch[1].trim());
-  }
-
-  return { originalFrom, originalDate };
-}
-
-function extractEmail(fromString) {
-  // Extract email from "John Doe <john@example.com>" or plain "john@example.com"
-  const match = fromString.match(/<([^>]+)>/) || fromString.match(/([^\s]+@[^\s]+)/);
-  return match ? match[1].toLowerCase() : null;
-}
-
-function isAllowedSender(email, allowedSenders) {
-  return allowedSenders.map(s => s.toLowerCase()).includes(email.toLowerCase());
-}
-
-function parseDate(dateString) {
-  // Handle various date formats from email clients
-  const parsed = new Date(dateString);
-  if (!isNaN(parsed)) {
-    return parsed.toISOString();
-  }
-  // Fallback: return null, use forward timestamp instead
-  return null;
-}
-```
 
 **Handling "Last Reply Was Me" Scenario**:
 
@@ -270,31 +218,6 @@ On Mon, Dec 9, 2024 at 10:30 AM John Doe <john@example.com> wrote:
 ```
 
 Result: `From: John Doe <john@example.com>` (the client, not you)
-
-**Database Fields Updated**:
-| Field | Source | Fallback |
-|-------|--------|----------|
-| From | Extracted from forwarded headers | Postmark `From` (forwarder's address) |
-| Date | Extracted from forwarded headers | Postmark `Date` (forward timestamp) |
-
-**Example**:
-```
-You forward an email with these headers in the body:
-
----------- Forwarded message ---------
-From: John Doe <john@example.com>
-Date: Mon, Dec 9, 2024 at 10:30 AM
-Subject: Q4 Invoice
-To: you@gmail.com
-
-Extracted:
-- originalFrom: "John Doe <john@example.com>"
-- originalDate: "2024-12-09T18:30:00.000Z"
-
-Database entry shows:
-- From: John Doe <john@example.com>  ← The actual sender
-- Date: 2024-12-09                    ← When they sent it
-```
 
 
 ### 7. Forwarding Header Stripping
@@ -331,29 +254,6 @@ Date: December 9, 2024 at 10:30:00 AM PST
 To: Jane Smith <jane@example.com>
 ```
 
-**Implementation**:
-```javascript
-function stripForwardingHeaders(text) {
-  // Gmail
-  text = text.replace(/^-{5,}\s*Forwarded message\s*-{5,}\s*\n(From:.*\n)?(Date:.*\n)?(Subject:.*\n)?(To:.*\n)?(Cc:.*\n)?/gim, '');
-
-  // Outlook
-  text = text.replace(/^_{5,}\s*\n(From:.*\n)?(Sent:.*\n)?(To:.*\n)?(Cc:.*\n)?(Subject:.*\n)?/gim, '');
-
-  // Apple Mail
-  text = text.replace(/^Begin forwarded message:\s*\n\n?(From:.*\n)?(Subject:.*\n)?(Date:.*\n)?(To:.*\n)?(Cc:.*\n)?/gim, '');
-
-  // Generic "Original Message" header
-  text = text.replace(/^-{3,}\s*Original Message\s*-{3,}\s*\n(From:.*\n)?(Sent:.*\n)?(To:.*\n)?(Subject:.*\n)?/gim, '');
-
-  return text.trim();
-}
-```
-
-**Applied to both**:
-- `TextBody` (plain text version)
-- `HtmlBody` (after conversion to markdown, before Notion blocks)
-
 
 ### 8. Email Body Processing
 
@@ -380,47 +280,6 @@ turndown.addRule('ignoreImages', {
 const markdown = turndown.turndown(htmlBody);
 ```
 
-**URL Handling**:
-URLs are converted to clickable Notion links in two cases:
-
-1. **HTML links** (`<a href="...">text</a>`) — Turndown converts these to Markdown `[text](url)`, which becomes a Notion link
-2. **Plain text URLs** — Detected via regex and converted to links
-
-```javascript
-// Detect plain URLs in text and convert to Markdown links
-function linkifyUrls(text) {
-  const urlPattern = /(?<![\[\(])(https?:\/\/[^\s\]\)]+)/g;
-  return text.replace(urlPattern, '[$1]($1)');
-}
-
-// Apply after turndown, before Notion block conversion
-const markdownWithLinks = linkifyUrls(markdown);
-```
-
-When converting to Notion blocks, Markdown links become rich text with link annotations:
-
-```json
-{
-  "type": "text",
-  "text": {
-    "content": "View the document",
-    "link": { "url": "https://example.com/doc.pdf" }
-  }
-}
-```
-
-For plain URLs converted to self-referencing links, the URL itself is displayed as clickable text:
-
-```json
-{
-  "type": "text",
-  "text": {
-    "content": "https://example.com/doc.pdf",
-    "link": { "url": "https://example.com/doc.pdf" }
-  }
-}
-```
-
 **Markdown to Notion Blocks**:
 The Markdown is then parsed and converted to Notion block types:
 
@@ -437,26 +296,7 @@ The Markdown is then parsed and converted to Notion block types:
 | `[link](url)` | Rich text with link |
 
 **Text Chunking**:
-Notion has a 2000-character limit per rich_text element. Long paragraphs are automatically chunked:
-
-```javascript
-function chunkText(text, maxLength = 2000) {
-  const chunks = [];
-  while (text.length > 0) {
-    if (text.length <= maxLength) {
-      chunks.push(text);
-      break;
-    }
-    // Find a good break point (newline, space, or hard cut)
-    let breakPoint = text.lastIndexOf('\n', maxLength);
-    if (breakPoint === -1) breakPoint = text.lastIndexOf(' ', maxLength);
-    if (breakPoint === -1) breakPoint = maxLength;
-    chunks.push(text.slice(0, breakPoint));
-    text = text.slice(breakPoint).trimStart();
-  }
-  return chunks;
-}
-```
+Notion has a 2000-character limit per rich_text element. Long paragraphs are automatically chunked.
 
 
 ### 9. AI Summarization (Optional)
@@ -468,35 +308,6 @@ When configured with an Anthropic API key and summary prompt, the Lambda generat
 - `summaryPrompt`: Custom prompt for summarization (e.g., "Summarize in 2-3 sentences, focusing on action items")
 
 If either value is missing or empty, summarization is skipped silently.
-
-**Implementation**:
-```javascript
-const Anthropic = require('@anthropic-ai/sdk');
-
-async function summarizeEmail(emailBody, summaryPrompt, apiKey) {
-  if (!apiKey || !summaryPrompt) {
-    return null; // Summarization disabled
-  }
-
-  const client = new Anthropic({ apiKey });
-
-  const response = await client.messages.create({
-    model: 'claude-3-5-haiku-latest',
-    max_tokens: 300,
-    messages: [
-      {
-        role: 'user',
-        content: `${summaryPrompt}\n\n---\n\n${emailBody}`
-      }
-    ]
-  });
-
-  return response.content[0].text;
-}
-```
-
-**Error Handling**:
-If the Claude API call fails, the email is still processed without a summary. A warning is logged to CloudWatch but no error is surfaced to the user.
 
 **Cost Estimate**:
 Claude 3.5 Haiku pricing:
@@ -510,48 +321,29 @@ Typical email (~500 words ≈ 700 tokens input, ~100 tokens output):
 
 ### 10. Attachment Handling
 
-**Postmark Attachment Format**:
-```json
+**MIME Attachment Format**:
+When parsing MIME with `mailparser`, attachments are provided as:
+```javascript
 {
-  "Attachments": [
-    {
-      "Name": "invoice.pdf",
-      "Content": "base64-encoded-content",
-      "ContentType": "application/pdf",
-      "ContentLength": 45678,
-      "ContentID": ""
-    },
-    {
-      "Name": "logo.png",
-      "Content": "base64-encoded-content",
-      "ContentType": "image/png",
-      "ContentLength": 12345,
-      "ContentID": "ii_abc123"
-    }
-  ]
+  filename: "invoice.pdf",
+  content: Buffer,  // Raw file content
+  contentType: "application/pdf",
+  size: 45678,
+  cid: ""  // Content-ID for embedded images
 }
 ```
 
 **Filtering Logic**:
-- **Include**: Attachments with empty `ContentID` (manually attached files)
-- **Skip**: Attachments with non-empty `ContentID` (CID-embedded images used in HTML templates)
-
-```javascript
-function filterAttachments(attachments) {
-  return attachments.filter(att => !att.ContentID || att.ContentID === '');
-}
-```
+- **Include**: Attachments with empty `cid` (manually attached files)
+- **Skip**: Attachments with non-empty `cid` (CID-embedded images used in HTML templates)
 
 **Notion File Upload**:
-Attachments are uploaded directly to Notion using their file upload API. Each database row is also a Notion page, so files are added as blocks within that page.
+Attachments are uploaded directly to Notion using their file upload API:
 
-```
-┌─────────────────┐     ┌─────────────────┐
-│ Postmark sends  │────▶│ Lambda uploads  │
-│ base64 file     │     │ directly to     │
-│                 │     │ Notion page     │
-└─────────────────┘     └─────────────────┘
-```
+1. Call `POST /v1/files` with filename and content type
+2. Receive signed upload URL
+3. PUT file content to signed URL
+4. Add file block to page referencing the uploaded file
 
 **Supported vs Unsupported Attachments**:
 
@@ -561,26 +353,6 @@ Attachments are uploaded directly to Notion using their file upload API. Each da
 | **Images** | PNG, JPG, JPEG, GIF, WEBP | Upload to Notion as image block |
 | **Archives** | ZIP, RAR, 7Z, TAR, GZ | Upload to Notion as file block |
 | **Unsupported** | EXE, DLL, BAT, SH, and files >20MB | Skip, add warning callout |
-
-**Failure Handling**:
-When an attachment fails to upload, the system records this in the Notion page content:
-
-```json
-{
-  "type": "callout",
-  "callout": {
-    "icon": { "type": "emoji", "emoji": "⚠️" },
-    "rich_text": [
-      {
-        "type": "text",
-        "text": {
-          "content": "Attachment skipped: report.exe (unsupported file type)"
-        }
-      }
-    ]
-  }
-}
-```
 
 
 ### 11. Notion Database Integration
@@ -598,43 +370,7 @@ You create the database manually in Notion with these properties:
 | Summary | rich_text | AI-generated summary (if enabled) |
 
 **Page Content Structure**:
-Each database row is also a page. The email body and attachments are added as page content:
-
-```
-┌─────────────────────────────────────────┐
-│ Database Row Properties                 │
-│ ─────────────────────────────────────── │
-│ Name: Q4 Invoice Discussion             │
-│ Date: 2024-12-09                        │
-│ From: john@example.com                  │
-│ Client: acme                            │
-│ Has Attachments: ✓                      │
-│ Summary: Client requesting invoice...   │
-└─────────────────────────────────────────┘
-
-┌─────────────────────────────────────────┐
-│ Page Content                            │
-│ ─────────────────────────────────────── │
-│ ✨ Summary: Client is requesting Q4     │
-│    invoice review. Action needed:       │
-│    approve by Friday.                   │
-│ ─────────────────────────────────────── │
-│ Hi team,                                │
-│                                         │
-│ Please find the **Q4 invoice** attached.│
-│                                         │
-│ Best regards,                           │
-│ John                                    │
-│ ─────────────────────────────────────── │
-│ 📎 invoice.pdf (45.6 KB)               │
-│ 🖼️ chart.png                           │
-└─────────────────────────────────────────┘
-```
-
-**API Endpoints Used**:
-- `POST /v1/pages` - Create database row with properties
-- `POST /v1/blocks/{page_id}/children` - Add content blocks to page
-- File upload via Notion's internal file hosting
+Each database row is also a page. The email body and attachments are added as page content.
 
 **Setup Required**:
 1. Create a database in Notion with the properties listed above
@@ -643,93 +379,32 @@ Each database row is also a page. The email body and attachments are added as pa
 4. Copy the database ID from the URL: `notion.so/{workspace}/{database_id}?v=...`
 
 
-### 12. Error Notifications
+### 12. Error Handling
 
-When processing fails, the Lambda sends an error notification email back to the sender using the Postmark API.
+When processing fails, the Lambda logs the error to the Notion database itself.
 
-**Notification Scenarios**:
+**Error Entry Fields**:
+- Name: Original subject with "[ERROR]" prefix
+- Date: When error occurred
+- From: Original sender
+- Client: "error"
+- Content: Error message and stack trace
 
-| Scenario | Database Entry Created? | Notification Sent? |
+**Error Scenarios**:
+
+| Scenario | Database Entry Created? | Logged to Notion? |
 |----------|------------------------|-------------------|
 | Unauthorized sender | No | No (silent reject) |
 | Invalid recipient (wrong secret) | No | No (silent reject) |
 | Missing #client tag in subject | No | Yes |
-| Notion API failure | No | Yes |
+| Notion API failure | No | Attempted |
 | Attachment upload failure | Yes | Yes (warning) |
 | Claude API failure | Yes | No (non-critical) |
-
-**Implementation**:
-```javascript
-const postmark = require('postmark');
-
-async function sendNotification(serverToken, to, subject, body) {
-  const client = new postmark.ServerClient(serverToken);
-
-  await client.sendEmail({
-    From: `notion-inbox@yourdomain.com`,
-    To: to,
-    Subject: subject,
-    TextBody: body
-  });
-}
-
-// Error notification
-async function notifyError(config, originalFrom, errorMessage) {
-  await sendNotification(
-    config.postmarkServerToken,
-    originalFrom,
-    'Failed to archive email to Notion',
-    `Your forwarded email could not be archived.\n\nError: ${errorMessage}\n\nPlease check the subject line format (#clientname: Subject) and try again.`
-  );
-}
-
-// Warning notification (attachment failed but entry created)
-async function notifyWarning(config, originalFrom, notionUrl, warnings) {
-  await sendNotification(
-    config.postmarkServerToken,
-    originalFrom,
-    'Email archived with warnings',
-    `Your email was archived to Notion, but some attachments could not be uploaded.\n\nNotion entry: ${notionUrl}\n\nWarnings:\n${warnings.join('\n')}`
-  );
-}
-```
-
-**Email Templates**:
-
-Error (entry not created):
-```
-Subject: Failed to archive email to Notion
-
-Your forwarded email could not be archived.
-
-Error: Missing client tag in subject (expected #clientname:)
-
-Please check the subject line format and try again.
-Original subject: "Fwd: Re: Q4 Invoice Discussion"
-```
-
-Warning (entry created, attachment failed):
-```
-Subject: Email archived with warnings
-
-Your email was archived to Notion, but some attachments could not be uploaded.
-
-Notion entry: https://notion.so/abc123...
-
-Warnings:
-- Attachment skipped: report.exe (unsupported file type)
-- Attachment skipped: bigfile.zip (exceeds 20MB limit)
-```
-
-**Postmark Outbound Setup**:
-The same Postmark account used for inbound can send outbound emails. You need:
-1. A verified sender signature or domain in Postmark
-2. The Server API Token (different from the inbound webhook—this is for sending)
 
 
 ### 13. Configuration Storage
 
-**Recommended: SSM Parameter Store**
+**SSM Parameter Store**
 
 | Parameter Path | Type | Purpose |
 |----------------|------|---------|
@@ -737,7 +412,6 @@ The same Postmark account used for inbound can send outbound emails. You need:
 | `/email-to-notion/allowed-senders` | StringList | Comma-separated list of allowed sender emails |
 | `/email-to-notion/notion-database-id` | String | Target Notion database ID |
 | `/email-to-notion/notion-api-key` | SecureString | Notion integration API key |
-| `/email-to-notion/postmark-server-token` | SecureString | Postmark API token for sending notifications |
 | `/email-to-notion/anthropic-api-key` | SecureString | Optional: Anthropic API key |
 | `/email-to-notion/summary-prompt` | String | Optional: AI summarization prompt |
 
@@ -754,11 +428,15 @@ The same Postmark account used for inbound can send outbound emails. You need:
 
 | Resource | Purpose |
 |----------|---------|
+| `aws_ses_domain_identity` | Domain verification for SES |
+| `aws_ses_receipt_rule_set` | Rule set for inbound processing |
+| `aws_ses_receipt_rule` | Store in S3 + invoke Lambda |
+| `aws_s3_bucket` | Temporary email storage |
 | `aws_lambda_function` | Main processing logic |
-| `aws_lambda_function_url` | HTTPS endpoint for Postmark webhook |
+| `aws_lambda_permission` | Allow SES to invoke Lambda |
 | `aws_iam_role` | Lambda execution role |
-| `aws_iam_role_policy` | Permissions for SSM, CloudWatch |
-| `aws_ssm_parameter` × 7 | Configuration values (see above) |
+| `aws_iam_role_policy` | Permissions for S3, SSM, CloudWatch |
+| `aws_ssm_parameter` × 6 | Configuration values (see above) |
 | `aws_cloudwatch_log_group` | Lambda logs |
 
 ### Variables
@@ -786,10 +464,9 @@ variable "notion_api_key" {
   sensitive   = true
 }
 
-variable "postmark_server_token" {
-  description = "Postmark Server API token for sending notification emails"
+variable "email_domain" {
+  description = "Domain for receiving emails via SES"
   type        = string
-  sensitive   = true
 }
 
 variable "anthropic_api_key" {
@@ -809,14 +486,19 @@ variable "summary_prompt" {
 ### Outputs
 
 ```hcl
-output "webhook_url" {
-  description = "URL to configure in Postmark inbound settings"
-  value       = aws_lambda_function_url.webhook.function_url
+output "ses_mx_record" {
+  description = "MX record to add to your DNS"
+  value       = "10 inbound-smtp.${data.aws_region.current.name}.amazonaws.com"
 }
 
-output "inbox_email" {
+output "ses_verification_token" {
+  description = "TXT record value for domain verification"
+  value       = aws_ses_domain_identity.main.verification_token
+}
+
+output "ses_inbox_address" {
   description = "Email address to forward emails to"
-  value       = "notion-${var.inbox_secret}@yourdomain.com"
+  value       = "notion-${var.inbox_secret}@${var.email_domain}"
   sensitive   = true
 }
 ```
@@ -828,18 +510,23 @@ output "inbox_email" {
 ### Inbox Address Security
 The inbox email address contains a secret: `notion-{secret}@yourdomain.com`. Anyone who knows this address can create entries in your Notion database. Choose a sufficiently random secret (e.g., UUID or 32+ character random string).
 
-### Webhook Validation
-Lambda validates that the recipient address matches the configured inbox secret. Emails sent to other addresses at your domain are rejected.
+### SES Receipt Rule Filtering
+The SES receipt rule only accepts emails sent to the exact secret inbox address. Emails to other addresses at your domain are not processed.
 
 ### Secrets Management
 - All API keys stored in SSM Parameter Store as SecureString
-- Lambda IAM role has minimal permissions (only SSM read, CloudWatch logs)
+- Lambda IAM role has minimal permissions (only S3 read, SSM read, CloudWatch logs)
 - No secrets in Terraform state if using `sensitive = true` and remote state encryption
 
 ### Notion Permissions
 - Integration only has access to databases/pages explicitly shared with it
 - Use a dedicated integration (not your personal token)
 - Share only the email database, nothing else
+
+### Email Storage
+- Raw emails stored in S3 with 7-day retention
+- Auto-deleted after processing window
+- No long-term email storage
 
 ---
 
@@ -861,12 +548,12 @@ Lambda validates that the recipient address matches the configured inbox secret.
 | **CID-embedded images** | Template images (logos, signatures) are intentionally skipped. |
 | **Real-time email** | This is for forwarding completed threads, not live email processing. |
 | **High volume** | Lambda concurrency limits. Add SQS queue if needed. |
-| **Delivery confirmation** | No retry if Notion API fails. Add DynamoDB + retry logic if critical. |
 
 ### Privacy Assessment
 | Component | Data Exposure |
 |-----------|---------------|
-| Postmark | Sees email content transiently (processes and forwards). No storage unless you enable their archive feature. |
+| AWS SES | Receives email, stores briefly in S3. Your AWS account. |
+| AWS S3 | Raw email stored 7 days. Your AWS account. |
 | AWS Lambda | Processes email in memory. Only logs are persisted (you control what's logged). |
 | Anthropic API | Email content sent to Claude for summarization (if enabled). Anthropic does not train on API data. |
 | Notion | Final destination for email content and attachments. Your data, your workspace. |
@@ -877,14 +564,14 @@ Lambda validates that the recipient address matches the configured inbox secret.
 
 | Service | Free Tier | Estimated Monthly Cost |
 |---------|-----------|------------------------|
-| Postmark Inbound | 100 emails/month | $0 (or $10 for 10K) |
+| AWS SES | N/A | $0.10 per 1,000 emails received |
+| AWS S3 | 5GB storage | ~$0 for email storage (auto-delete) |
 | Lambda | 1M requests, 400K GB-seconds | $0 for typical usage |
-| Lambda Function URL | Free | $0 |
 | SSM Parameter Store | Free for standard parameters | $0 |
 | CloudWatch Logs | 5GB ingestion | $0 for typical usage |
 | Notion | Free tier or existing plan | $0 |
 | Claude 3.5 Haiku (optional) | N/A | ~$0.001 per email (~$1/1K emails) |
-| **Total** | | **$0–10/month** |
+| **Total** | | **$0–5/month** |
 
 ---
 
@@ -892,10 +579,8 @@ Lambda validates that the recipient address matches the configured inbox secret.
 
 ### One-Time Setup
 - [ ] Register domain (or use existing)
-- [ ] Create Postmark account and Inbound Server
-- [ ] Configure DNS MX records for your domain
-- [ ] Verify sender domain/signature in Postmark (for outbound notifications)
-- [ ] Get Postmark Server API Token (for sending emails)
+- [ ] Verify domain with SES (TXT record)
+- [ ] Configure MX records for SES inbound
 - [ ] Create Notion database with required properties (Name, Date, From, Client, Has Attachments, Summary)
 - [ ] Create Notion Integration and share database with it
 - [ ] Copy database ID from Notion URL
@@ -904,10 +589,10 @@ Lambda validates that the recipient address matches the configured inbox secret.
 
 ### Terraform Deployment
 - [ ] Configure AWS credentials
-- [ ] Set Terraform variables (inbox secret, allowed senders, database ID, API keys, Postmark token)
+- [ ] Set Terraform variables (inbox secret, allowed senders, database ID, API keys, email domain)
 - [ ] Run `terraform init` and `terraform apply`
-- [ ] Copy webhook URL from Terraform output
-- [ ] Configure webhook URL in Postmark Inbound settings
+- [ ] Copy MX record and verification token from Terraform output
+- [ ] Configure DNS with MX and TXT records
 
 ### Testing
 - [ ] Forward a test email to `notion-{secret}@yourdomain.com`
@@ -918,10 +603,9 @@ Lambda validates that the recipient address matches the configured inbox secret.
 - [ ] Forward a thread where your reply is the last message, verify "From" shows the client (not you)
 - [ ] Verify email body appears as formatted page content (forwarding headers stripped)
 - [ ] Verify AI summary appears (if summarization enabled)
-- [ ] Forward email with attachments, verify they appear in Notion
-- [ ] Test with unsupported file type, verify warning notification email received
-- [ ] Test from unauthorized email, verify silent rejection (no entry, no notification)
-- [ ] Test with missing #hashtag, verify error notification email received
+- [ ] Forward email with attachments, verify they upload to Notion
+- [ ] Test from unauthorized email, verify silent rejection (no entry)
+- [ ] Test with missing #hashtag, verify error logged to Notion
 - [ ] Check CloudWatch logs for any errors
 
 ### Adding a New Client
@@ -929,39 +613,3 @@ Just forward an email with a new #hashtag. No configuration changes needed.
 
 ### Adding a New Sender Email
 Update the `allowed_senders` SSM parameter or Terraform variable. Redeploy is not required if using SSM.
-
----
-
-## Evaluation Summary
-
-### Strengths
-- **Zero client configuration**: New clients via #hashtag, no config updates
-- **Privacy**: Email content transient in Postmark/Lambda, stored only in your Notion
-- **Security**: Sender whitelist + secret inbox address prevents unauthorized submissions
-- **Cost**: Effectively free for typical usage
-- **Rich formatting**: HTML emails converted to well-formatted Notion blocks, forwarding headers stripped
-- **AI summarization**: Optional Claude 3.5 Haiku integration (~$1/1K emails)
-- **Direct Notion storage**: Attachments stored in Notion, no S3 bucket needed
-- **Searchable database**: Filter by client, date, attachments in Notion views
-- **Error visibility**: Email notifications for failures and attachment warnings
-- **Reliability**: Postmark and Lambda are highly available services
-
-### Weaknesses
-- **Manual forwarding**: You must forward emails (not automatic inbox integration)
-- **No retry logic**: If Notion API fails, email is lost (you get notified, but must re-forward)
-- **Notion file limits**: 20MB max per attachment
-- **Summarization privacy**: If enabled, email content is sent to Anthropic's API
-- **Fixed sender list**: Adding new sender emails requires config update (though no redeploy)
-
-### Verdict
-This design is optimized for the "archive completed email threads" use case. The #hashtag approach eliminates client configuration entirely, making it trivial to organize emails by client. The trade-off is manual forwarding, which is intentional—you control exactly which threads get archived.
-
----
-
-## Next Steps
-
-1. Review this design and confirm requirements
-2. Create Notion database with required schema
-3. Generate Terraform configuration and Lambda code
-4. Set up Postmark and DNS
-5. Deploy and test

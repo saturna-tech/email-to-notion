@@ -419,7 +419,13 @@ function processEmailBody(htmlBody, textBody, allowedSenders) {
   markdown = linkifyUrls(markdown);
 
   // Convert to Notion blocks
-  return markdownToBlocks(markdown);
+  const contentBlocks = markdownToBlocks(markdown);
+
+  // Return both blocks and cleaned content (for AI summarization)
+  return {
+    contentBlocks,
+    cleanedContent: markdown
+  };
 }
 
 module.exports = {

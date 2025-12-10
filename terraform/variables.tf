@@ -32,12 +32,6 @@ variable "notion_api_key" {
   sensitive   = true
 }
 
-variable "postmark_server_token" {
-  description = "Postmark Server API token for sending notification emails"
-  type        = string
-  sensitive   = true
-}
-
 variable "anthropic_api_key" {
   description = "Anthropic API key for Claude summarization (optional, leave empty to disable)"
   type        = string
@@ -49,4 +43,21 @@ variable "summary_prompt" {
   description = "Prompt for email summarization (optional, leave empty to disable)"
   type        = string
   default     = ""
+}
+
+variable "email_domain" {
+  description = "Domain for receiving emails via SES"
+  type        = string
+}
+
+variable "ses_enabled" {
+  description = "Enable SES email receiving"
+  type        = bool
+  default     = true
+}
+
+variable "email_retention_days" {
+  description = "Days to retain raw emails in S3 before deletion"
+  type        = number
+  default     = 7
 }

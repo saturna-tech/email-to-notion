@@ -15,10 +15,10 @@ Notion Email Archiver is a self-hosted system that receives forwarded emails and
 ## Architecture
 
 ```
-Email → Postmark (inbound) → Lambda → Notion API
-                               ↓
-                          Postmark (outbound notifications)
+Email → SES → S3 → Lambda → Notion API
 ```
+
+SES receives inbound email, stores raw MIME in S3, then triggers Lambda. Lambda parses the MIME content, processes the email, and creates entries in Notion with file uploads.
 
 ## Tech Stack
 
@@ -26,8 +26,8 @@ Email → Postmark (inbound) → Lambda → Notion API
 |-----------|------------|
 | Runtime | Node.js 20.x |
 | Infrastructure | Terraform |
-| Cloud | AWS (Lambda, SSM, CloudWatch) |
-| Email | Postmark (inbound + outbound) |
+| Cloud | AWS (Lambda, SES, S3, SSM, CloudWatch) |
+| Email | AWS SES (inbound receiving) |
 | Database | Notion |
 | AI | Claude 3.5 Haiku (optional) |
 
@@ -42,19 +42,19 @@ email-to-notion/
 │   ├── DESIGN.md       # Technical specification
 │   └── PLAN.md         # Implementation stages
 ├── terraform/
-│   ├── main.tf         # Lambda, IAM, SSM resources
+│   ├── main.tf         # Lambda, IAM, SES, S3 resources
 │   ├── variables.tf    # Input variables
-│   ├── outputs.tf      # Webhook URL, etc.
+│   ├── outputs.tf      # MX record, verification token, etc.
 │   └── terraform.tfvars.example
 ├── src/
 │   ├── index.js        # Lambda handler
 │   ├── validate.js     # Recipient & sender validation
 │   ├── parse.js        # Subject & header parsing
 │   ├── convert.js      # HTML → Markdown → Notion blocks
-│   ├── notion.js       # Notion API client
+│   ├── notion.js       # Notion API client with file uploads
 │   ├── attachments.js  # Attachment filtering & upload
 │   ├── summarize.js    # Claude AI summarization
-│   ├── notify.js       # Postmark error notifications
+│   ├── ses.js          # SES event parsing & S3 MIME retrieval
 │   ├── test.js         # Unit tests
 │   └── package.json
 └── .gitignore
@@ -66,13 +66,10 @@ email-to-notion/
 
 ```bash
 # Install dependencies
-npm install
+cd src && npm install
 
 # Run tests
 npm test
-
-# Package Lambda for deployment
-npm run build
 ```
 
 ### Terraform
@@ -93,14 +90,6 @@ terraform apply -var-file=terraform.tfvars
 terraform output
 ```
 
-### Testing Locally
-
-```bash
-# Invoke Lambda locally with test payload
-# (requires SAM CLI or similar)
-sam local invoke -e test/events/sample-email.json
-```
-
 ## SSM Parameters
 
 All configuration is stored in SSM Parameter Store under `/email-to-notion/`:
@@ -111,11 +100,16 @@ All configuration is stored in SSM Parameter Store under `/email-to-notion/`:
 | `allowed-senders` | StringList | Yes |
 | `notion-database-id` | String | Yes |
 | `notion-api-key` | SecureString | Yes |
-| `postmark-server-token` | SecureString | Yes |
 | `anthropic-api-key` | SecureString | No |
 | `summary-prompt` | String | No |
 
 ## Key Implementation Details
+
+### SES Integration
+- SES receipt rule filters by recipient address (only accepts emails to `notion-{secret}@domain`)
+- Raw MIME email stored in S3 bucket with 7-day retention
+- Lambda triggered asynchronously after S3 storage
+- MIME parsed using `mailparser` library
 
 ### Subject Parsing
 - Extract `#clientname:` prefix (required)
@@ -125,18 +119,26 @@ All configuration is stored in SSM Parameter Store under `/email-to-notion/`:
 ### Sender Extraction
 - Parse forwarded headers for `From:` field
 - Skip any `From:` matching `allowed-senders` (handles "I replied last" case)
-- Fall back to Postmark sender if parsing fails
+- Fall back to SES sender if parsing fails
 
 ### Attachment Handling
 - Include: `ContentID` empty (manual attachments)
 - Skip: `ContentID` present (CID-embedded images)
 - Skip: Executables (exe, dll, bat, sh)
 - Skip: Files > 20MB
-- Upload directly to Notion (no S3)
+- Upload directly to Notion using file upload API
+
+### Notion File Upload
+The Notion API requires a two-step process for file uploads:
+1. Call `POST /v1/files` to get a signed upload URL
+2. Upload file content to the signed URL
+3. Reference the uploaded file in a block
+
+This is handled in `notion.js` with proper content-type handling.
 
 ### Error Handling
-- Always return 200 to Postmark (avoid retries)
-- Send email notification for actionable errors
+- Errors logged to Notion database with error details
+- Lambda throws on error (allows for retry/DLQ if configured)
 - Silent reject for unauthorized senders
 - Log all errors to CloudWatch
 
@@ -179,12 +181,13 @@ aws logs tail /aws/lambda/email-to-notion --follow
 | No database entry | Check SSM parameters, Notion sharing |
 | Wrong "From" field | Forwarding header parsing failed |
 | Missing attachments | ContentID filtering too aggressive |
-| No error email | Postmark token or sender verification |
 | Lambda timeout | Large attachment, increase timeout |
+| SES not receiving | Check MX records, domain verification |
 
 ## Security Notes
 
 - Never log email content (privacy)
 - Inbox secret should be UUID or 32+ random chars
 - Notion integration should only have access to email database
-- Postmark sender domain must be verified
+- SES receipt rule filters by exact recipient address
+- Raw emails in S3 auto-delete after 7 days

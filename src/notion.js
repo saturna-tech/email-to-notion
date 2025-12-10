@@ -143,6 +143,112 @@ async function createEmailEntry(client, options) {
 }
 
 /**
+ * Create an error entry in the database
+ * @param {Client} client - Notion client
+ * @param {Object} options - Entry options
+ * @param {string} options.databaseId - Target database ID
+ * @param {string} options.subject - Email subject
+ * @param {string} options.from - Sender address
+ * @param {string} options.date - Email date
+ * @param {string} options.errorMessage - Error message
+ * @returns {Object} - Created page object
+ */
+async function createErrorEntry(client, options) {
+  const {
+    databaseId,
+    subject,
+    from,
+    date,
+    errorMessage,
+  } = options;
+
+  // Generate UUID for this entry
+  const uuid = crypto.randomUUID();
+
+  // Parse date for Notion
+  let dateValue = null;
+  if (date) {
+    try {
+      const parsed = new Date(date);
+      if (!isNaN(parsed.getTime())) {
+        dateValue = parsed.toISOString().split('T')[0];
+      }
+    } catch (e) {
+      // Ignore date parsing errors
+    }
+  }
+
+  // Build properties with error in Summary field
+  const properties = {
+    Name: {
+      title: [
+        {
+          text: {
+            content: subject || 'Unknown',
+          },
+        },
+      ],
+    },
+    UUID: {
+      rich_text: [
+        {
+          text: {
+            content: uuid,
+          },
+        },
+      ],
+    },
+    From: {
+      rich_text: [
+        {
+          text: {
+            content: from || 'Unknown',
+          },
+        },
+      ],
+    },
+    Client: {
+      rich_text: [
+        {
+          text: {
+            content: 'error',
+          },
+        },
+      ],
+    },
+    'Has Attachments': {
+      checkbox: false,
+    },
+    Summary: {
+      rich_text: [
+        {
+          text: {
+            content: `ERROR: ${truncateText(errorMessage, 1900)}`,
+          },
+        },
+      ],
+    },
+  };
+
+  if (dateValue) {
+    properties.Date = {
+      date: {
+        start: dateValue,
+      },
+    };
+  }
+
+  const page = await client.pages.create({
+    parent: {
+      database_id: databaseId,
+    },
+    properties,
+  });
+
+  return page;
+}
+
+/**
  * Append blocks to a page, handling Notion's 100 block limit per request
  * @param {Client} client - Notion client
  * @param {string} pageId - Page ID
@@ -256,6 +362,7 @@ function getPageUrl(page) {
 module.exports = {
   createClient,
   createEmailEntry,
+  createErrorEntry,
   appendBlocksToPage,
   addSummaryCallout,
   addWarningCallout,

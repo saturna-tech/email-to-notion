@@ -6,53 +6,59 @@ This document outlines the staged implementation plan for Notion Email Archiver 
 
 ## Stage 1: Infrastructure Foundation
 
-**Goal:** Deploy minimal AWS infrastructure that can receive webhooks.
+**Goal:** Deploy minimal AWS infrastructure that can receive emails.
 
 ### Tasks
 1. Create Terraform configuration for:
    - Lambda function (Node.js 20.x, 512MB, 60s timeout)
-   - Lambda Function URL
-   - IAM role with SSM and CloudWatch permissions
+   - SES domain identity and receipt rules
+   - S3 bucket for email storage (7-day retention)
+   - IAM role with S3, SSM, and CloudWatch permissions
    - CloudWatch log group
    - SSM parameters (placeholder values for now)
 
 2. Create minimal Lambda handler that:
-   - Logs incoming requests
-   - Returns 200 OK
+   - Logs incoming SES events
+   - Returns success
 
 3. Deploy to AWS
 
 ### Success Criteria
 - [ ] `terraform apply` completes without errors
-- [ ] Lambda Function URL is accessible via HTTPS
-- [ ] Sending a POST request to the URL returns 200
-- [ ] Request is logged in CloudWatch
+- [ ] SES domain identity created (pending verification)
+- [ ] S3 bucket created with lifecycle policy
+- [ ] Lambda function deployed
 
 ---
 
-## Stage 2: Postmark Integration
+## Stage 2: SES Integration
 
-**Goal:** Receive and validate inbound emails from Postmark.
+**Goal:** Receive and validate inbound emails from SES.
 
 ### Tasks
-1. Set up Postmark inbound server and DNS (MX records)
+1. Configure DNS records:
+   - TXT record for SES domain verification
+   - MX record pointing to SES inbound
 
 2. Update Lambda to:
-   - Parse Postmark webhook payload
+   - Parse SES event structure
+   - Fetch raw MIME from S3
+   - Parse MIME using mailparser
    - Validate recipient address contains inbox secret
    - Validate sender is in allowed senders list
-   - Return 200 for valid requests, 403 for unauthorized
+   - Return success for valid requests
 
 3. Update SSM parameters with real values:
    - `inbox-secret`
    - `allowed-senders`
 
 ### Success Criteria
-- [ ] Postmark MX records are configured and verified
+- [ ] SES domain is verified
+- [ ] MX records are configured
 - [ ] Email to `notion-{secret}@yourdomain.com` triggers Lambda
-- [ ] Email from allowed sender logs payload and returns 200
-- [ ] Email from unauthorized sender returns 200 (silent reject) with no processing
-- [ ] Email to wrong address (wrong secret) returns 200 (silent reject)
+- [ ] Email from allowed sender logs parsed content
+- [ ] Email from unauthorized sender is silently rejected
+- [ ] Email to wrong address (wrong secret) is not processed
 
 ---
 
@@ -67,7 +73,7 @@ This document outlines the staged implementation plan for Notion Email Archiver 
    - Return `{ client, subject }` or throw error
 
 2. Add error handling:
-   - Missing client tag → log error, skip processing (notification added later)
+   - Missing client tag → log error, create error entry in Notion (added later)
 
 ### Success Criteria
 - [ ] `#acme: Fwd: Re: Q4 Invoice` → `{ client: "acme", subject: "Q4 Invoice" }`
@@ -97,7 +103,7 @@ This document outlines the staged implementation plan for Notion Email Archiver 
 - [ ] Forwarded email from client → extracts client's email and date
 - [ ] Forwarded thread where you replied last → extracts client (skips your address)
 - [ ] Gmail, Outlook, Apple Mail headers all stripped correctly
-- [ ] Fallback to Postmark sender/date if parsing fails
+- [ ] Fallback to SES sender/date if parsing fails
 
 ---
 
@@ -164,14 +170,15 @@ This document outlines the staged implementation plan for Notion Email Archiver 
 
 ### Tasks
 1. Implement attachment filtering:
-   - Include: `ContentID` empty (manual attachments)
-   - Exclude: `ContentID` present (CID-embedded images)
+   - Include: `cid` empty (manual attachments)
+   - Exclude: `cid` present (CID-embedded images)
    - Exclude: Executable files (exe, dll, bat, sh)
    - Exclude: Files > 20MB
 
 2. Implement Notion file upload:
-   - Upload via Notion API
-   - Add as file block (documents) or image block (images)
+   - Call POST /v1/files to get signed upload URL
+   - Upload file content to signed URL
+   - Add file block (documents) or image block (images) to page
    - Track upload failures
 
 3. Add warning callouts for failed/skipped attachments
@@ -216,35 +223,27 @@ This document outlines the staged implementation plan for Notion Email Archiver 
 
 ---
 
-## Stage 9: Error Notifications
+## Stage 9: Error Handling
 
-**Goal:** Send email notifications for failures and warnings.
+**Goal:** Log errors to Notion database for visibility.
 
 ### Tasks
-1. Add dependency: `postmark`
+1. Implement error entry creation:
+   - Create database entry with "[ERROR]" prefix in title
+   - Set client to "error"
+   - Include error message in page content
 
-2. Implement notification functions:
-   - `notifyError()`: For complete failures (missing hashtag, Notion API down)
-   - `notifyWarning()`: For partial success (attachment failures)
-
-3. Set up Postmark outbound:
-   - Verify sender domain/signature
-   - Get Server API Token
-
-4. Update SSM parameter:
-   - `postmark-server-token`
-
-5. Integrate notifications into main flow:
+2. Integrate error handling into main flow:
    - Wrap processing in try/catch
-   - Send appropriate notification on failure
-   - Send warning notification if attachments failed but entry created
+   - Log errors to Notion when possible
+   - Always log to CloudWatch
+   - Re-throw to signal Lambda failure (for retry/DLQ if configured)
 
 ### Success Criteria
-- [ ] Missing hashtag → error email received with helpful message
-- [ ] Notion API failure → error email received
-- [ ] Attachment upload failure → warning email with Notion link
-- [ ] Unauthorized sender → NO email sent (silent reject)
-- [ ] Claude API failure → NO email sent (non-critical)
+- [ ] Missing hashtag → error entry in Notion with helpful message
+- [ ] Notion API failure → attempted error entry, logged to CloudWatch
+- [ ] Unauthorized sender → NO entry (silent reject)
+- [ ] All errors logged to CloudWatch with stack traces
 
 ---
 
@@ -270,18 +269,17 @@ This document outlines the staged implementation plan for Notion Email Archiver 
 3. Add input validation:
    - Sanitize client names (alphanumeric only)
    - Validate SSM parameters on startup
-   - Handle malformed Postmark payloads gracefully
+   - Handle malformed MIME gracefully
 
 4. Review error handling:
    - Ensure no unhandled promise rejections
-   - Ensure Lambda always returns 200 to Postmark (avoid retries)
+   - Lambda throws on error (allows retry/DLQ)
 
 ### Success Criteria
 - [ ] All test scenarios pass
 - [ ] CloudWatch logs are structured and queryable
 - [ ] No sensitive data in logs
-- [ ] Malformed requests don't crash Lambda
-- [ ] Lambda always returns 200 (even on internal errors)
+- [ ] Malformed emails don't crash Lambda
 
 ---
 
@@ -303,15 +301,14 @@ This document outlines the staged implementation plan for Notion Email Archiver 
    - *.zip
 
 5. Production deployment:
-   - Use remote Terraform state (S3 + DynamoDB)
+   - Use remote Terraform state (S3 + DynamoDB) if desired
    - Enable Lambda versioning
-   - Set up CloudWatch alarm for errors
+   - Set up CloudWatch alarm for errors (optional)
 
 ### Success Criteria
-- [ ] New user can deploy from QUICKSTART.md in < 30 minutes
+- [ ] New user can deploy from QUICKSTART.md
 - [ ] No secrets in git repository
-- [ ] Terraform state is remote and encrypted
-- [ ] CloudWatch alarm fires on Lambda errors
+- [ ] CloudWatch logs show successful processing
 
 ---
 
@@ -319,15 +316,14 @@ This document outlines the staged implementation plan for Notion Email Archiver 
 
 | Stage | Dependencies Added |
 |-------|-------------------|
-| 1 | (none - infrastructure only) |
-| 2 | (none - Postmark webhook is passive) |
+| 1 | `@aws-sdk/client-ssm` |
+| 2 | `@aws-sdk/client-s3`, `mailparser` |
 | 3 | (none - pure JS) |
 | 4 | (none - pure JS) |
 | 5 | `turndown`, `turndown-plugin-gfm` |
 | 6 | `@notionhq/client` |
 | 7 | (none - uses Notion SDK) |
 | 8 | `@anthropic-ai/sdk` |
-| 9 | `postmark` |
 
 ---
 
@@ -335,8 +331,36 @@ This document outlines the staged implementation plan for Notion Email Archiver 
 
 | Risk | Mitigation |
 |------|------------|
-| Postmark webhook format changes | Pin to known payload structure, log unknown fields |
+| SES delivery issues | Monitor CloudWatch, check MX records |
+| MIME parsing edge cases | Comprehensive test suite, fallback to raw content |
 | Notion API rate limits | Add exponential backoff, warn in docs about high volume |
 | Claude API costs spike | Log token usage, set max_tokens limit |
-| Email parsing edge cases | Comprehensive test suite, fallback to raw content |
 | Lambda timeout on large emails | Increase timeout, skip very large attachments |
+| S3 bucket filling up | Lifecycle policy auto-deletes after 7 days |
+
+---
+
+## Completed Stages
+
+All stages have been implemented:
+
+- [x] Stage 1: Infrastructure Foundation
+- [x] Stage 2: SES Integration
+- [x] Stage 3: Subject Line Parsing
+- [x] Stage 4: Forwarded Email Parsing
+- [x] Stage 5: Email Body Processing
+- [x] Stage 6: Notion Database Integration
+- [x] Stage 7: Attachment Handling (with Notion file upload fix)
+- [x] Stage 8: AI Summarization
+- [x] Stage 9: Error Handling
+- [x] Stage 10: End-to-End Testing & Hardening
+- [x] Stage 11: Documentation & Deployment
+
+### Key Implementation Notes
+
+**Notion File Upload Fix**: The Notion API requires a two-step process for file uploads:
+1. Call `POST /v1/files` with filename and content type to get a signed upload URL
+2. PUT the file content directly to the signed URL
+3. Reference the uploaded file in a block
+
+This is different from the external URL approach and allows direct file storage in Notion without external hosting.
