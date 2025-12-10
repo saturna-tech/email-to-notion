@@ -8,8 +8,8 @@ Email-to-Notion is a self-hosted system that receives forwarded emails and store
 
 ## Key Documents
 
-- `DESIGN.md` - Complete technical specification
-- `PLAN.md` - Staged implementation plan with success criteria
+- `docs/DESIGN.md` - Complete technical specification
+- `docs/PLAN.md` - Staged implementation plan with success criteria
 - `QUICKSTART.md` - User setup and deployment guide
 
 ## Architecture
@@ -35,10 +35,12 @@ Email → Postmark (inbound) → Lambda → Notion API
 
 ```
 email-to-notion/
-├── DESIGN.md           # Technical specification
-├── PLAN.md             # Implementation stages
+├── README.md           # Project overview
 ├── QUICKSTART.md       # User guide
 ├── CLAUDE.md           # This file
+├── docs/
+│   ├── DESIGN.md       # Technical specification
+│   └── PLAN.md         # Implementation stages
 ├── terraform/
 │   ├── main.tf         # Lambda, IAM, SSM resources
 │   ├── variables.tf    # Input variables
@@ -46,13 +48,15 @@ email-to-notion/
 │   └── terraform.tfvars.example
 ├── src/
 │   ├── index.js        # Lambda handler
+│   ├── validate.js     # Recipient & sender validation
 │   ├── parse.js        # Subject & header parsing
 │   ├── convert.js      # HTML → Markdown → Notion blocks
 │   ├── notion.js       # Notion API client
 │   ├── attachments.js  # Attachment filtering & upload
 │   ├── summarize.js    # Claude AI summarization
-│   └── notify.js       # Postmark error notifications
-├── package.json
+│   ├── notify.js       # Postmark error notifications
+│   ├── test.js         # Unit tests
+│   └── package.json
 └── .gitignore
 ```
 

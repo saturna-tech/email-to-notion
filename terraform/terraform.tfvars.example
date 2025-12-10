@@ -1,0 +1,32 @@
+# Copy this file to terraform.tfvars and fill in your values
+# DO NOT commit terraform.tfvars to version control
+
+aws_region = "us-east-1"
+
+# Secret for inbox email address: notion-{inbox_secret}@yourdomain.com
+# Generate with: uuidgen
+inbox_secret = "your-uuid-here"
+
+# Email addresses allowed to forward emails (your personal/work emails)
+allowed_senders = [
+  "you@gmail.com",
+  "you@work.com"
+]
+
+# Notion configuration
+# Database ID from URL: notion.so/workspace/{database_id}?v=...
+notion_database_id = "your-database-id"
+
+# Integration API key from https://www.notion.so/my-integrations
+notion_api_key = "secret_xxxxx"
+
+# Postmark Server API token (for sending notification emails)
+postmark_server_token = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# Optional: AI summarization with Claude
+# Leave empty to disable
+anthropic_api_key = ""
+summary_prompt    = ""
+
+# Example summary prompt (uncomment to enable):
+# summary_prompt = "Summarize this email in 2-3 sentences, focusing on action items and key information."
