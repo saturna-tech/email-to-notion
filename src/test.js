@@ -172,6 +172,30 @@ test('returns null for empty text', () => {
   assertEqual(result.originalDate, null);
 });
 
+test('extracts date from same block as sender', () => {
+  // When you forwarded your own reply, the date should come from the client's message, not yours
+  const text = `
+---------- Forwarded message ---------
+From: Me <me@example.com>
+Date: Tue, Dec 10, 2024 at 9:00 AM
+Subject: Re: Project Update
+To: client@company.com
+
+Thanks for the update!
+
+---------- Forwarded message ---------
+From: Client Person <client@company.com>
+Date: Mon, Dec 9, 2024 at 10:00 AM
+Subject: Project Update
+To: me@example.com
+
+Here is the original message.
+`;
+  const result = parseForwardedHeaders(text, ['me@example.com']);
+  assert(result.originalFrom.includes('client@company.com'), 'Should extract client as sender');
+  assert(result.originalDate.includes('2024-12-09'), 'Should extract Dec 9 date from client message, not Dec 10');
+});
+
 // ============ stripForwardingHeaders tests ============
 
 console.log('\n--- stripForwardingHeaders tests ---');

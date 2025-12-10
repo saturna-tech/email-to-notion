@@ -65,11 +65,55 @@ function parseForwardedHeaders(text, allowedSenders) {
   // Normalize allowed senders to lowercase
   const selfEmails = (allowedSenders || []).map(s => s.toLowerCase());
 
-  // Find all "From:" occurrences in the text
-  // This handles cases where your reply is at the top of the forwarded thread
-  const fromPattern = /From:\s*(.+?)(?:\n|$)/gim;
+  // Find all forwarded message blocks and extract From/Date pairs
+  // We want the date from the most recent non-self sender
 
+  // Pattern to find forwarding header blocks (Gmail, Outlook, Apple Mail)
+  // Each block typically has From:, Date:/Sent:, Subject:, To: in some order
+  const blockPatterns = [
+    // Gmail: "---------- Forwarded message ---------" followed by headers
+    /-{5,}\s*Forwarded message\s*-{5,}[\s\S]*?(?=\n\n|\n-{5,}|$)/gi,
+    // Outlook: "________________________________" followed by headers
+    /_{5,}[\s\S]*?(?=\n\n|\n_{5,}|$)/gi,
+    // Apple Mail: "Begin forwarded message:" followed by headers
+    /Begin forwarded message:[\s\S]*?(?=\n\n|$)/gi,
+    // Generic inline quotes: "On ... wrote:"
+    /On .+?wrote:[\s\S]*?(?=\n\n|$)/gi,
+  ];
+
+  // First pass: try to find From/Date pairs in header blocks
+  for (const pattern of blockPatterns) {
+    const blocks = text.match(pattern) || [];
+    for (const block of blocks) {
+      const fromMatch = block.match(/From:\s*(.+?)(?:\n|$)/i);
+      if (fromMatch) {
+        const fromValue = fromMatch[1].trim();
+        const emailInFrom = extractEmailFromHeader(fromValue);
+
+        // Skip if this is one of the allowed senders (i.e., yourself)
+        if (emailInFrom && selfEmails.includes(emailInFrom.toLowerCase())) {
+          continue;
+        }
+
+        // Found a non-self sender, get the date from the same block
+        originalFrom = fromValue;
+
+        const dateMatch = block.match(/(?:Date|Sent):\s*(.+?)(?:\n|$)/i);
+        if (dateMatch) {
+          originalDate = parseDateString(dateMatch[1].trim());
+        }
+
+        // Return first non-self sender found (most recent in thread)
+        return { originalFrom, originalDate };
+      }
+    }
+  }
+
+  // Second pass: fall back to scanning all From: lines if no blocks matched
+  const fromPattern = /From:\s*(.+?)(?:\n|$)/gim;
   let match;
+  let fromPosition = -1;
+
   while ((match = fromPattern.exec(text)) !== null) {
     const fromValue = match[1].trim();
     const emailInFrom = extractEmailFromHeader(fromValue);
@@ -81,14 +125,17 @@ function parseForwardedHeaders(text, allowedSenders) {
 
     // Found a non-self sender
     originalFrom = fromValue;
+    fromPosition = match.index;
     break;
   }
 
-  // Get the date - look for Date: or Sent: field
-  const datePattern = /(?:Date|Sent):\s*(.+?)(?:\n|$)/im;
-  const dateMatch = text.match(datePattern);
-  if (dateMatch) {
-    originalDate = parseDateString(dateMatch[1].trim());
+  // If we found a From, look for the nearest Date/Sent after it
+  if (originalFrom && fromPosition >= 0) {
+    const textAfterFrom = text.slice(fromPosition);
+    const dateMatch = textAfterFrom.match(/(?:Date|Sent):\s*(.+?)(?:\n|$)/im);
+    if (dateMatch) {
+      originalDate = parseDateString(dateMatch[1].trim());
+    }
   }
 
   return { originalFrom, originalDate };
@@ -129,10 +176,25 @@ function parseDateString(dateString) {
     return null;
   }
 
+  // Normalize the date string for better parsing
+  let normalized = dateString
+    // Gmail uses "at" between date and time: "Mon, Dec 9, 2024 at 10:00 AM"
+    .replace(/\s+at\s+/gi, ' ')
+    // Remove extra whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
+
   // Try to parse with Date constructor
-  const parsed = new Date(dateString);
+  const parsed = new Date(normalized);
   if (!isNaN(parsed.getTime())) {
     return parsed.toISOString();
+  }
+
+  // Try parsing without the day name (e.g., "Dec 9, 2024 10:00 AM")
+  const withoutDay = normalized.replace(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s*/i, '');
+  const parsedWithoutDay = new Date(withoutDay);
+  if (!isNaN(parsedWithoutDay.getTime())) {
+    return parsedWithoutDay.toISOString();
   }
 
   return null;
