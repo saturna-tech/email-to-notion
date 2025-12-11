@@ -39,49 +39,49 @@ function assertEqual(actual, expected, message) {
 
 console.log('\n--- parseSubject tests ---');
 
-test('parses simple client tag', () => {
+test('parses simple hashtag', () => {
   const result = parseSubject('#acme: Q4 Invoice');
-  assertEqual(result.client, 'acme');
+  assertEqual(result.hashtag, 'acme');
   assertEqual(result.subject, 'Q4 Invoice');
 });
 
-test('parses client tag with Fwd prefix', () => {
+test('parses hashtag with Fwd prefix', () => {
   const result = parseSubject('#beta: Fwd: Meeting Notes');
-  assertEqual(result.client, 'beta');
+  assertEqual(result.hashtag, 'beta');
   assertEqual(result.subject, 'Meeting Notes');
 });
 
 test('strips multiple forwarding prefixes', () => {
-  const result = parseSubject('#client: Fwd: Re: Fw: RE: FW: Hello');
-  assertEqual(result.client, 'client');
+  const result = parseSubject('#project: Fwd: Re: Fw: RE: FW: Hello');
+  assertEqual(result.hashtag, 'project');
   assertEqual(result.subject, 'Hello');
 });
 
-test('lowercases client name', () => {
+test('lowercases hashtag', () => {
   const result = parseSubject('#ACME: Test');
-  assertEqual(result.client, 'acme');
+  assertEqual(result.hashtag, 'acme');
 });
 
-test('sanitizes client name - removes non-alphanumeric', () => {
-  const result = parseSubject('#test_client: Subject');
-  assertEqual(result.client, 'testclient');
+test('sanitizes hashtag - removes non-alphanumeric', () => {
+  const result = parseSubject('#test_tag: Subject');
+  assertEqual(result.hashtag, 'testtag');
 });
 
-test('parses client tag without colon', () => {
+test('parses hashtag without colon', () => {
   const result = parseSubject('#acme Fwd: Invoice');
-  assertEqual(result.client, 'acme');
+  assertEqual(result.hashtag, 'acme');
   assertEqual(result.subject, 'Invoice');
 });
 
 test('uses "missing" for null subject', () => {
   const result = parseSubject(null);
-  assertEqual(result.client, 'missing');
+  assertEqual(result.hashtag, 'missing');
   assertEqual(result.subject, '');
 });
 
 test('uses "missing" when no hashtag', () => {
   const result = parseSubject('Fwd: Just a regular subject');
-  assertEqual(result.client, 'missing');
+  assertEqual(result.hashtag, 'missing');
   assertEqual(result.subject, 'Just a regular subject');
 });
 

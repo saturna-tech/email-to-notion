@@ -22,7 +22,7 @@ function createClient(apiKey) {
  * @param {string} options.subject - Email subject (cleaned)
  * @param {string} options.from - Sender address
  * @param {string} options.date - Email date (ISO string)
- * @param {string} options.client - Client name (from hashtag)
+ * @param {string} options.hashtag - Hashtag value (from subject)
  * @param {boolean} options.hasAttachments - Whether email has attachments
  * @param {string} options.summary - AI summary (optional)
  * @param {Array} options.contentBlocks - Notion blocks for page content
@@ -34,7 +34,7 @@ async function createEmailEntry(client, options) {
     subject,
     from,
     date,
-    client: clientName,
+    hashtag,
     hasAttachments,
     summary,
     contentBlocks,
@@ -88,12 +88,12 @@ async function createEmailEntry(client, options) {
         },
       ],
     },
-    // Client - rich text
-    Client: {
+    // Hashtag - rich text
+    Hashtag: {
       rich_text: [
         {
           text: {
-            content: clientName || 'Unknown',
+            content: hashtag || 'Unknown',
           },
         },
       ],
@@ -207,7 +207,7 @@ async function createErrorEntry(client, options) {
         },
       ],
     },
-    Client: {
+    Hashtag: {
       rich_text: [
         {
           text: {

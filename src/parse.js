@@ -3,36 +3,35 @@
  */
 
 /**
- * Parse subject line to extract client tag and clean subject
+ * Parse subject line to extract hashtag and clean subject
  * @param {string} subject - The email subject line
- * @returns {{ client: string, subject: string }} - Parsed result
- * @throws {Error} - If client tag is missing
+ * @returns {{ hashtag: string, subject: string }} - Parsed result
  */
 function parseSubject(subject) {
   if (!subject) {
     subject = '';
   }
 
-  // Extract client tag: #clientname or #clientname: (colon optional)
-  const clientMatch = subject.match(/^#(\w+):?\s*/);
+  // Extract hashtag: #tagname or #tagname: (colon optional)
+  const hashtagMatch = subject.match(/^#(\w+):?\s*/);
 
-  let client;
+  let hashtag;
   let cleanSubject;
 
-  if (clientMatch) {
-    // Sanitize client name: lowercase, alphanumeric only, max 50 chars
-    client = clientMatch[1].toLowerCase();
-    client = client.replace(/[^a-z0-9]/g, '');
-    if (client.length > 50) {
-      client = client.slice(0, 50);
+  if (hashtagMatch) {
+    // Sanitize hashtag: lowercase, alphanumeric only, max 50 chars
+    hashtag = hashtagMatch[1].toLowerCase();
+    hashtag = hashtag.replace(/[^a-z0-9]/g, '');
+    if (hashtag.length > 50) {
+      hashtag = hashtag.slice(0, 50);
     }
-    if (!client) {
-      client = 'missing';
+    if (!hashtag) {
+      hashtag = 'missing';
     }
-    cleanSubject = subject.slice(clientMatch[0].length);
+    cleanSubject = subject.slice(hashtagMatch[0].length);
   } else {
-    // No hashtag found, use "missing" as client
-    client = 'missing';
+    // No hashtag found, use "missing"
+    hashtag = 'missing';
     cleanSubject = subject;
   }
 
@@ -43,7 +42,7 @@ function parseSubject(subject) {
   }
 
   return {
-    client,
+    hashtag,
     subject: cleanSubject.trim(),
   };
 }

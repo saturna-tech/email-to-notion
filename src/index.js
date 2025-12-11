@@ -126,9 +126,9 @@ exports.handler = async (event) => {
 
     // Stage 3: Parse subject line
     const parsed = parseSubject(body.Subject);
-    const client = parsed.client;
+    const hashtag = parsed.hashtag;
     const cleanSubject = parsed.subject;
-    console.log('Subject parsed', { requestId, client, cleanSubject: cleanSubject?.slice(0, 100) });
+    console.log('Subject parsed', { requestId, hashtag, cleanSubject: cleanSubject?.slice(0, 100) });
 
     // Stage 4: Parse forwarded headers to get original sender
     const emailText = body.TextBody || '';
@@ -189,14 +189,14 @@ exports.handler = async (event) => {
       subject: cleanSubject,
       from: fromAddress,
       date: emailDate,
-      client,
+      hashtag,
       hasAttachments,
       summary,
       contentBlocks: finalContentBlocks,
     });
 
     const pageUrl = getPageUrl(page);
-    console.log('Notion entry created', { requestId, pageId: page.id, client });
+    console.log('Notion entry created', { requestId, pageId: page.id, hashtag });
 
     // Stage 7: Upload attachments to page
     if (validAttachments.length > 0) {
@@ -218,7 +218,7 @@ exports.handler = async (event) => {
 
     console.log('Email processed successfully', {
       requestId,
-      client,
+      hashtag,
       pageId: page.id,
       hasAttachments,
       hasSummary: !!summary,
