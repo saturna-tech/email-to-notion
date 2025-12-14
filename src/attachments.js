@@ -120,6 +120,18 @@ function getMimeType(filename) {
 }
 
 /**
+ * Sanitize filename for use in HTTP headers (prevents header injection)
+ * @param {string} filename - The filename
+ * @returns {string} - Sanitized filename
+ */
+function sanitizeFilename(filename) {
+  if (!filename) return 'attachment';
+  return filename
+    .replace(/[\r\n]/g, '')    // Remove CRLF (header injection)
+    .replace(/"/g, '\\"');      // Escape quotes
+}
+
+/**
  * Check if a file should be displayed as a PDF in Notion
  * @param {string} filename - The filename
  * @returns {boolean}
@@ -187,7 +199,7 @@ async function uploadFileToNotion(notionApiKey, filename, base64Content) {
     const boundary = '----NotionFileUpload' + Date.now();
     const formDataParts = [
       `--${boundary}\r\n`,
-      `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n`,
+      `Content-Disposition: form-data; name="file"; filename="${sanitizeFilename(filename)}"\r\n`,
       `Content-Type: ${mimeType}\r\n\r\n`,
     ];
 
